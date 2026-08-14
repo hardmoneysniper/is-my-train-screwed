@@ -15,9 +15,12 @@ live against the real feed on 2026-08-14 — see REUSE.md §5 for why GTFS-RT
 was chosen over SIRI StopMonitoring (mini-nyc-3d has a reusable decode
 pattern for GTFS-RT; nothing to port for SIRI).
 """
+import gzip
 import json
 import os
+import shutil
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -33,6 +36,8 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
 BASE_URL = "https://gtfsrt.prod.obanyc.com"
 ENDPOINTS = ["tripUpdates", "vehiclePositions"]
 MAX_BACKOFF_SECONDS = 300
+
+_last_seen_date_str: str | None = None  # tracks day rollover so we compress exactly once per boundary
 
 
 def _api_key() -> str:
@@ -51,9 +56,48 @@ def _fetch_feed(endpoint: str, key: str) -> gtfs_realtime_pb2.FeedMessage:
     return feed
 
 
+def _compress_and_remove(path: Path) -> None:
+    """Gzip a completed day's ndjson file and remove the plaintext original.
+
+    Today's file is never touched here — only files from a prior day, so a
+    file being actively appended to is never compressed out from under the
+    writer.
+    """
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    original_size = path.stat().st_size
+    try:
+        with open(path, "rb") as f_in, gzip.open(gz_path, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        compressed_size = gz_path.stat().st_size
+        path.unlink()
+        ratio = compressed_size / original_size if original_size else 0
+        print(f"[bus_collector] compressed {path.name}: {original_size} -> {compressed_size} bytes "
+              f"({ratio:.1%})", flush=True)
+    except Exception:
+        print(f"[bus_collector] failed to compress {path.name}:", file=sys.stderr, flush=True)
+        traceback.print_exc()
+
+
+def _compress_stale_files(today_str: str) -> None:
+    """Gzip any *.ndjson file in DATA_DIR that isn't today's — covers both a
+    normal day-boundary rollover and any file left uncompressed by a prior
+    run that was restarted mid-day (e.g. after a Startup-folder relaunch).
+    """
+    if not DATA_DIR.exists():
+        return
+    for path in DATA_DIR.glob("*.ndjson"):
+        if path.stem != today_str:
+            threading.Thread(target=_compress_and_remove, args=(path,), daemon=True).start()
+
+
 def _rotated_path(now: datetime) -> Path:
+    global _last_seen_date_str
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return DATA_DIR / f"{now.strftime('%Y-%m-%d')}.ndjson"
+    today_str = now.strftime('%Y-%m-%d')
+    if _last_seen_date_str != today_str:
+        _compress_stale_files(today_str)
+        _last_seen_date_str = today_str
+    return DATA_DIR / f"{today_str}.ndjson"
 
 
 def _now_iso() -> str:
