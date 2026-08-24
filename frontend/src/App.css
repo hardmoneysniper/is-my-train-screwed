@@ -1,0 +1,134 @@
+:root {
+  --ink: #0a0a0a;
+  --paper: #ffffff;
+  --signal: #1472ff;
+  --signal-ink: #ffffff;
+  --bubble-grey: #e5e5ea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
+    "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  width: 100%;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.app.hero {
+  justify-content: center;
+  align-items: center;
+  gap: 24px;
+}
+
+.app.started {
+  justify-content: flex-end;
+}
+
+.hero-title {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  font-size: clamp(1.8rem, 6vw, 2.6rem);
+  text-align: center;
+  margin: 0;
+}
+
+.conversation {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+}
+
+.bubble {
+  max-width: 80%;
+  padding: 12px 16px;
+  border-radius: 18px;
+  font-size: 1rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background: var(--signal);
+  color: var(--signal-ink);
+  border-bottom-right-radius: 4px;
+}
+
+.bubble-assistant {
+  align-self: flex-start;
+  background: var(--bubble-grey);
+  color: var(--ink);
+  border-bottom-left-radius: 4px;
+}
+
+.composer {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.app.hero .composer {
+  max-width: 480px;
+}
+
+.composer-input {
+  flex: 1 1 auto;
+  padding: 13px 16px;
+  border-radius: 12px;
+  border: 1.5px solid rgba(10, 10, 10, 0.15);
+  font-family: inherit;
+  font-size: 1rem;
+  color: var(--ink);
+  background: #fff;
+}
+
+.composer-input::placeholder {
+  color: rgba(10, 10, 10, 0.4);
+}
+
+.composer-input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  border-color: transparent;
+}
+
+.composer-send {
+  padding: 13px 22px;
+  border-radius: 12px;
+  border: none;
+  background: var(--signal);
+  color: var(--signal-ink);
+  font-family: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.composer-send:hover {
+  filter: brightness(1.08);
+}
+
+.composer-send:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
