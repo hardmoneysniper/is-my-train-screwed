@@ -5,7 +5,14 @@ import httpx
 # Candidate URLs — subway URL is pattern-matched from mini-nyc-3d's confirmed-live
 # LIRR/MNR download URLs (web.mta.info/developers/data/{agency}/google_transit.zip);
 # NOT independently confirmed against the MTA developer portal. See REUSE.md §4.
-# Bus URL verified live as 'busco' agency (not 'nyct/bus') during Task 2 verification.
+#
+# Bus URL: the pattern-matched candidate ("nyct/bus") 404'd during Task 2's
+# live verification. "busco" was found by probing variations and confirmed
+# to return a real, complete MTA Bus Company GTFS feed (checked by hand:
+# real Queens routes under agency_id MTABC, all 9 standard GTFS files
+# present, correct sizes) -- but like subway, it is an HTTP-level check,
+# not a cross-reference against MTA's documented developer portal listing.
+# Same confidence caveat as subway above.
 GTFS_URLS = {
     "subway": "https://web.mta.info/developers/data/nyct/subway/google_transit.zip",
     "bus": "https://web.mta.info/developers/data/busco/google_transit.zip",
