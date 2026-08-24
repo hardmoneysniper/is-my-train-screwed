@@ -6,7 +6,13 @@ from shapely.ops import transform
 import pyproj
 
 
-_TO_METERS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+# UTM zone 18N covers NYC and is equidistant (unlike Web Mercator/EPSG:3857,
+# whose scale factor is sec(latitude) -- ~1.32x at NYC's ~40.7N, which was
+# silently inflating every distance_m by ~32%). Ranking was unaffected since
+# all NYC stops sit at similar latitude, but the reported distances were
+# wrong. Not agency-agnostic beyond the NYC area; revisit if stops.txt ever
+# covers a wider region than the MTA network.
+_TO_METERS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32618", always_xy=True).transform
 
 
 class StopIndex:
