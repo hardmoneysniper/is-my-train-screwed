@@ -29,19 +29,18 @@ class ConversationAgent:
         )
 
         while response.stop_reason == "tool_use":
-            tool_use = next(b for b in response.content if b.type == "tool_use")
-            itineraries = await self._otp.plan_route(**tool_use.input)
-            tool_result = {
-                "role": "user",
-                "content": [{
+            tool_uses = [b for b in response.content if b.type == "tool_use"]
+            tool_results = []
+            for tool_use in tool_uses:
+                itineraries = await self._otp.plan_route(**tool_use.input)
+                tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
                     "content": json.dumps([it.model_dump() for it in itineraries]),
-                }],
-            }
+                })
             messages = messages + [
                 {"role": "assistant", "content": response.content},
-                tool_result,
+                {"role": "user", "content": tool_results},
             ]
             response = await self._client.messages.create(
                 model=settings.conversation_agent_model,
@@ -51,5 +50,7 @@ class ConversationAgent:
                 messages=messages,
             )
 
-        text_block = next(b for b in response.content if b.type == "text")
+        text_block = next((b for b in response.content if b.type == "text"), None)
+        if text_block is None:
+            return ""
         return text_block.text
