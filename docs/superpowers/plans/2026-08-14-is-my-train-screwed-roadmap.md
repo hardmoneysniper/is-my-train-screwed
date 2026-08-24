@@ -331,7 +331,12 @@ from shapely.ops import transform
 import pyproj
 
 
-_TO_METERS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True).transform
+# UTM zone 18N (EPSG:32618) — equidistant for the NYC area, unlike Web
+# Mercator (EPSG:3857), whose scale factor is sec(latitude): ~1.32x at
+# NYC's ~40.7N, which was found during Task 3's review to silently
+# inflate every distance_m by ~32%. Verified against true WGS84
+# geodesic distance: error dropped from 32% to 0.03%.
+_TO_METERS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32618", always_xy=True).transform
 
 
 class StopIndex:
