@@ -60,12 +60,17 @@ body {
 }
 
 .bubble {
-  max-width: 80%;
+  /* Wrap to the next line once a line would reach 70% of the screen width,
+     not just 70% of whatever the (already width-capped) .app column is --
+     see .composer-input below for why this is a max-width, not a fixed
+     width, and why overflow-wrap is what actually guarantees the wrap. */
+  max-width: 70vw;
   padding: 12px 16px;
   border-radius: 18px;
   font-size: 1rem;
   line-height: 1.35;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .bubble-user {
@@ -93,14 +98,34 @@ body {
 }
 
 .composer-input {
+  /* min-width:0 overrides flexbox's default min-width:auto on a flex item --
+     without it, a <textarea>'s intrinsic content width can force this item
+     wider than its share of the row (pushing the Send button off / causing
+     horizontal overflow) instead of actually wrapping within the space it's
+     given. This is what makes the max-width below (and wrapping in general)
+     take effect inside the flex row at all. */
   flex: 1 1 auto;
+  min-width: 0;
+  /* Same 70% of screen width as .bubble, so a line of typed text wraps at
+     the same threshold it will wrap at once it becomes a sent bubble. This
+     only ever binds on narrow/mobile viewports -- on desktop the .app
+     column's own 640px cap is already tighter, so it's a no-op there. */
+  max-width: 70vw;
   padding: 13px 16px;
   border-radius: 12px;
   border: 1.5px solid rgba(10, 10, 10, 0.15);
   font-family: inherit;
   font-size: 1rem;
+  line-height: 1.35;
   color: var(--ink);
   background: #fff;
+  resize: none;
+  overflow-wrap: anywhere;
+  /* Auto-grow is driven by JS (see App.tsx) setting an inline height up to
+     this cap; beyond it the box stops growing and scrolls internally
+     instead of pushing the Send button/layout around indefinitely. */
+  max-height: 160px;
+  overflow-y: auto;
 }
 
 .composer-input::placeholder {

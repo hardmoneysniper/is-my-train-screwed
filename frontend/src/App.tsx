@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
 import { sendChatMessage } from './api/client'
 import type { ChatMessage } from './api/client'
 import './App.css'
@@ -13,11 +13,20 @@ export default function App() {
   const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const started = messages.length > 0
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault()
+  // Auto-grow the composer to fit its content (up to the CSS max-height
+  // cap in App.css, where it switches to an internal scrollbar instead).
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [input])
+
+  async function sendMessage() {
     const trimmed = input.trim()
     if (!trimmed || sending) return
 
@@ -39,6 +48,22 @@ export default function App() {
     }
   }
 
+  function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    void sendMessage()
+  }
+
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter sends; Shift+Enter inserts a newline. Needed now that this is a
+    // <textarea> -- unlike <input>, a textarea's default Enter behavior is
+    // to insert a newline, not submit the form, so without this the multi-
+    // line composer would have no way to send a message via the keyboard.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      void sendMessage()
+    }
+  }
+
   return (
     <div className={`app ${started ? 'started' : 'hero'}`}>
       {!started && <h1 className="hero-title">Is my train screwed?</h1>}
@@ -54,11 +79,13 @@ export default function App() {
       )}
 
       <form className="composer" onSubmit={handleSubmit}>
-        <input
+        <textarea
+          ref={textareaRef}
           className="composer-input"
-          type="text"
+          rows={1}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
           placeholder={started ? 'Ask any follow up questions' : 'Ask about a trip'}
           disabled={sending}
         />

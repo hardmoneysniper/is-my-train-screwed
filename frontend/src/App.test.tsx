@@ -51,4 +51,29 @@ describe('App', () => {
       expect(screen.getByText(/something went wrong/i)).toBeInTheDocument()
     })
   })
+
+  it('sends on Enter but inserts a newline on Shift+Enter', async () => {
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ reply: 'Take the F train — about 30 minutes.' }),
+    } as Response)
+
+    render(<App />)
+    const composer = screen.getByPlaceholderText(/ask about a trip/i)
+
+    fireEvent.change(composer, { target: { value: 'line one' } })
+    fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })
+    // Shift+Enter must not submit.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.queryByText(/is my train screwed\?/i)).toBeInTheDocument() // still on hero, nothing sent
+
+    fireEvent.change(composer, { target: { value: 'line one\nline two' } })
+    fireEvent.keyDown(composer, { key: 'Enter' })
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+    // multi-line content is preserved in the sent bubble
+    expect(document.querySelector('.bubble-user')?.textContent).toBe('line one\nline two')
+  })
 })
