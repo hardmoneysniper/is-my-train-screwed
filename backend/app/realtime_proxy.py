@@ -19,13 +19,12 @@ import csv
 import datetime
 import io
 import pathlib
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response
 from google.transit import gtfs_realtime_pb2
-
-app = FastAPI(title="Subway GTFS-RT trip-id rewriting proxy")
 
 SUBWAY_ZIP = pathlib.Path(__file__).parent.parent / "data" / "gtfs" / "subway.zip"
 
@@ -109,10 +108,14 @@ class TripIndex:
 _trip_index: TripIndex | None = None
 
 
-@app.on_event("startup")
-def load_trip_index():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _trip_index
     _trip_index = TripIndex(SUBWAY_ZIP)
+    yield
+
+
+app = FastAPI(title="Subway GTFS-RT trip-id rewriting proxy", lifespan=lifespan)
 
 
 @app.get("/rt/{feed_group}")
