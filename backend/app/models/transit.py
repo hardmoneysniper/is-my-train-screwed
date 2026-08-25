@@ -11,6 +11,8 @@ class Leg(BaseModel):
     to_stop_name: str
     start_time_ms: int
     end_time_ms: int
+    real_time: bool = False
+    arrival_delay_seconds: int | None = None
 
 
 class Itinerary(BaseModel):

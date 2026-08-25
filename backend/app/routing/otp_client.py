@@ -9,10 +9,12 @@ query Plan($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!) {
       legs {
         mode
         route { shortName }
-        from { name stopId }
-        to { name stopId }
+        from { name stop { gtfsId } }
+        to { name stop { gtfsId } }
         startTime
         endTime
+        realTime
+        arrivalDelay
       }
     }
   }
@@ -44,12 +46,14 @@ class OTPClient:
                     Leg(
                         mode=leg["mode"],
                         route_short_name=(leg.get("route") or {}).get("shortName"),
-                        from_stop_id=leg["from"].get("stopId"),
+                        from_stop_id=(leg["from"].get("stop") or {}).get("gtfsId"),
                         from_stop_name=leg["from"]["name"],
-                        to_stop_id=leg["to"].get("stopId"),
+                        to_stop_id=(leg["to"].get("stop") or {}).get("gtfsId"),
                         to_stop_name=leg["to"]["name"],
                         start_time_ms=leg["startTime"],
                         end_time_ms=leg["endTime"],
+                        real_time=leg.get("realTime", False),
+                        arrival_delay_seconds=leg.get("arrivalDelay"),
                     )
                     for leg in it["legs"]
                 ],

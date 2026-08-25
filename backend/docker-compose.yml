@@ -5,4 +5,4 @@ services:
       - "8080:8080"
     volumes:
       - ./data/otp:/var/opentripplanner
-    command: ["--load", "--serve"]
+    command: ["--build", "--serve"]

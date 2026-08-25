@@ -1,0 +1,60 @@
+{
+  "updaters": [
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-bdfm",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-g",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-jz",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-l",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-si",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    }
+  ]
+}
