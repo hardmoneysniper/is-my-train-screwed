@@ -1,4 +1,9 @@
 {
+  "osm": [
+    {
+      "source": "file:///var/opentripplanner/NewYork.osm.pbf"
+    }
+  ],
   "transitFeeds": [
     {
       "type": "gtfs",
