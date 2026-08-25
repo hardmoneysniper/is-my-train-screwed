@@ -6,3 +6,5 @@ services:
     volumes:
       - ./data/otp:/var/opentripplanner
     command: ["--build", "--serve"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
