@@ -13,9 +13,22 @@ import httpx
 # present, correct sizes) -- but like subway, it is an HTTP-level check,
 # not a cross-reference against MTA's documented developer portal listing.
 # Same confidence caveat as subway above.
+#
+# The 5 "bus_*" borough entries below were added in Task 10 after discovering
+# that "bus" above (agency busco / MTA Bus Company) is only 92 routes, mostly
+# Queens -- it does NOT include "MTA New York City Transit" bus routes, which
+# is most of the citywide network, including M60 (one of the spec's two named
+# seed bus corridors). These 5 NYCT bus feeds are split by borough and were
+# confirmed live this session (HTTP 200, agency MTA New York City Transit,
+# 307 routes each, manhattan.zip confirmed to contain route M60).
 GTFS_URLS = {
     "subway": "https://web.mta.info/developers/data/nyct/subway/google_transit.zip",
     "bus": "https://web.mta.info/developers/data/busco/google_transit.zip",
+    "bus_manhattan": "https://web.mta.info/developers/data/nyct/bus/google_transit_manhattan.zip",
+    "bus_bronx": "https://web.mta.info/developers/data/nyct/bus/google_transit_bronx.zip",
+    "bus_brooklyn": "https://web.mta.info/developers/data/nyct/bus/google_transit_brooklyn.zip",
+    "bus_queens": "https://web.mta.info/developers/data/nyct/bus/google_transit_queens.zip",
+    "bus_staten_island": "https://web.mta.info/developers/data/nyct/bus/google_transit_staten_island.zip",
 }
 
 

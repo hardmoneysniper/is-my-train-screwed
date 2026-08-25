@@ -55,6 +55,20 @@
       "url": "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-si",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "feedId": "MTABC",
+      "fuzzyTripMatching": false
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "feedId": "MTA_NYCT_Bus_Manhattan",
+      "fuzzyTripMatching": false
     }
   ]
 }
