@@ -59,14 +59,14 @@
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=${MTA_BUSTIME_API_KEY}",
       "feedId": "MTABC",
       "fuzzyTripMatching": false
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=${MTA_BUSTIME_API_KEY}",
       "feedId": "MTA_NYCT_Bus_Manhattan",
       "fuzzyTripMatching": false
     }

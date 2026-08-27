@@ -8,3 +8,9 @@ services:
     command: ["--build", "--serve"]
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      # Compose auto-loads ./.env (this file's own directory) for the
+      # right-hand-side interpolation below -- no separate script needed.
+      # OTP itself substitutes ${MTA_BUSTIME_API_KEY} in router-config.json
+      # natively (its own env-var interpolation, applied before parsing).
+      - MTA_BUSTIME_API_KEY=${MTA_BUSTIME_API_KEY}

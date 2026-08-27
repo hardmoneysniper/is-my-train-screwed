@@ -1,9 +1,5 @@
 import pathlib
 import shutil
-import sys
-
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
-from app.config import settings
 
 ROOT = pathlib.Path(__file__).parent.parent
 OTP_CONFIG_DIR = ROOT / "otp_config"
@@ -42,13 +38,12 @@ def main():
         )
 
     shutil.copyfile(OTP_CONFIG_DIR / "build-config.json", OTP_DATA_DIR / "build-config.json")
-
-    if not settings.mta_bustime_api_key:
-        raise SystemExit("MTA_BUSTIME_API_KEY is not set in backend/.env")
-
-    template = (OTP_CONFIG_DIR / "router-config.template.json").read_text(encoding="utf-8")
-    rendered = template.replace("__MTA_BUSTIME_API_KEY__", settings.mta_bustime_api_key)
-    (OTP_DATA_DIR / "router-config.json").write_text(rendered, encoding="utf-8")
+    # router-config.json's ${MTA_BUSTIME_API_KEY} is OTP's own env-var
+    # interpolation syntax, substituted by OTP itself at startup -- copied
+    # verbatim, no rendering needed here. docker-compose.yml passes the
+    # real value into the container's environment (auto-loaded from
+    # backend/.env by Compose's own interpolation).
+    shutil.copyfile(OTP_CONFIG_DIR / "router-config.json", OTP_DATA_DIR / "router-config.json")
 
     print(f"[prepare_otp_data] OTP data directory ready at {OTP_DATA_DIR}")
 
