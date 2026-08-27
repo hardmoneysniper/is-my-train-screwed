@@ -1002,12 +1002,7 @@ git commit -m "feat: scaffold PWA chat shell with vite-plugin-pwa"
 Per this skill's scope-check rule, a spec this size (multi-agent backend + collectors + frontend across 5 phases) should not be turned into one giant bite-sized plan up front — later phases' concrete tasks depend on decisions only Phase 1 will surface (actual OTP response shapes, real static GTFS structure, etc.). Below is the roadmap-level scope for each; write `YYYY-MM-DD-<phase-name>.md` following this skill when each phase starts.
 
 ### Phase 2 — Risk Engine (spec §5, §5.1, §5.2)
-- `reliability_buckets` + `arrival_events` tables (SQLite) exactly as specced in §5.2.
-- Subway collector: poll the 8 confirmed GTFS-RT feed paths (see `REUSE.md` §1); port the `N`/`S` stop-suffix normalization; use `nyct-gtfs` for NYCT extension fields rather than a hand-rolled decoder (see `REUSE.md` §2).
-- Bus collector for Q70/M60 seed corridors — **decision needed from Frank first:** GTFS-RT (`gtfsrt.prod.obanyc.com`, reuses the subway collector's decode path, confirmed live with the provided key) vs. SIRI StopMonitoring (spec's named default, no reusable pattern exists). See `REUSE.md` §5.
-- subwaydata.nyc backfill loader — confirmed live, data back to 2021-04-01; use a 90-day window (`subwaydatanyc_YYYY-MM-DD_csv.tar.xz`, confirmed-live pattern).
-- Nightly aggregation job with exponential decay (§5.2), `get_risk` pure-function tool, provenance UI badge.
-- Not blocked on any pending manifest item — can start once Phase 1 ships.
+Superseded by `docs/superpowers/plans/2026-08-27-phase-2-risk-engine-plan.md`, written after Phase 1 shipped. That plan corrects this sketch's `nyct-gtfs`/live-subway-collector assumption (unnecessary — Phase 1's OTP work already covers it) and has the real task breakdown. Don't use this section for anything beyond history.
 
 ### Phase 3 — Monitoring (spec §6)
 - Trip Monitor poller (no LLM), 60s cadence, alert/headway-anomaly/elevator-outage triggers.
