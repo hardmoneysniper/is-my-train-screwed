@@ -31,7 +31,17 @@ from pathlib import Path
 from google.transit import gtfs_realtime_pb2
 
 CORRIDORS = ["Q70+", "M60+"]  # spec §2 seed set; Roosevelt Island Tram is static-schedule, not collected here
-POLL_INTERVAL_SECONDS = 30
+# Note: the M subway line (as in an M-train -> Q70 transfer) is NOT added here --
+# subway isn't corridor-filtered like bus. It's covered system-wide by the Phase 2
+# subwaydata.nyc ingestion pipeline instead (see docs/superpowers/plans/
+# 2026-08-27-phase-2-risk-engine-plan.md), and get_risk composes any transfer
+# pair (M->Q70 included) at query time from each route's own bucket -- spec §5
+# explicitly never stores per-transfer-pair data.
+POLL_INTERVAL_SECONDS = 60  # was 30 (2026-08-15 - 2026-08-27); halved 2026-08-27 to cut
+# data volume roughly in half (measured ~570-695K raw records/day at 30s) while
+# staying well under spec §5.2's 90s ambiguity threshold for passage-moment
+# derivation -- 60s leaves real margin against jitter/retries, 90s exactly
+# would leave none.
 DATA_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
 BASE_URL = "https://gtfsrt.prod.obanyc.com"
 ENDPOINTS = ["tripUpdates", "vehiclePositions"]
