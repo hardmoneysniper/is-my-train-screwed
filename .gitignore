@@ -13,6 +13,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
 
 # Node / frontend
 node_modules/
@@ -22,3 +23,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Subagent-driven-development scratch ledger (briefs, reports, diff packages)
+.superpowers/

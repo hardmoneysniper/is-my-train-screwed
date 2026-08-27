@@ -1,0 +1,74 @@
+{
+  "updaters": [
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/ace",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/bdfm",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/g",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/jz",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/nqrw",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/l",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/numbered",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "http://host.docker.internal:8090/rt/si",
+      "feedId": "MTA_NYCT_Subway",
+      "fuzzyTripMatching": true
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "feedId": "MTABC",
+      "fuzzyTripMatching": false
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=__MTA_BUSTIME_API_KEY__",
+      "feedId": "MTA_NYCT_Bus_Manhattan",
+      "fuzzyTripMatching": false
+    }
+  ]
+}

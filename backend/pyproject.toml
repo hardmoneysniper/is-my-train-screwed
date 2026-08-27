@@ -1,0 +1,26 @@
+[project]
+name = "is-my-train-screwed-backend"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "shapely>=2.0",
+    "rtree>=1.3",
+    "pyproj>=3.6",
+    "anthropic>=0.40",
+    "gtfs-realtime-bindings>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

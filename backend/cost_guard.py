@@ -21,9 +21,13 @@ LOG_PATH = Path(__file__).parent / "data" / "cost_log.ndjson"
 
 # Haiku 4.5 pricing (USD per million tokens) — verify against
 # https://platform.claude.com/docs/en/about-claude/pricing before trusting
-# this for real budgeting; update here if pricing changes.
+# this for real budgeting; update here if pricing changes. Confirmed live
+# 2026-08-24, including the prompt-caching multipliers below (a 5-minute
+# cache write costs 1.25x base input; a cache hit costs 0.1x base input).
 PRICE_PER_MTOK_INPUT_USD = 1.00
 PRICE_PER_MTOK_OUTPUT_USD = 5.00
+PRICE_PER_MTOK_CACHE_WRITE_USD = 1.25
+PRICE_PER_MTOK_CACHE_READ_USD = 0.10
 
 # How many multiples of the sustainable daily rate (cap / 30) count as
 # "draining too fast" and trigger the alarm print.
@@ -41,8 +45,15 @@ def _hard_cap_usd() -> float:
 def _cost_usd(usage: dict) -> float:
     input_tokens = usage.get("input_tokens", 0) or 0
     output_tokens = usage.get("output_tokens", 0) or 0
+    # Present (as separate fields, not folded into input_tokens) whenever
+    # prompt caching is in play -- 0/absent otherwise, so this is a no-op
+    # for callers that don't use caching.
+    cache_creation_tokens = usage.get("cache_creation_input_tokens", 0) or 0
+    cache_read_tokens = usage.get("cache_read_input_tokens", 0) or 0
     return (input_tokens / 1_000_000) * PRICE_PER_MTOK_INPUT_USD + \
-           (output_tokens / 1_000_000) * PRICE_PER_MTOK_OUTPUT_USD
+           (output_tokens / 1_000_000) * PRICE_PER_MTOK_OUTPUT_USD + \
+           (cache_creation_tokens / 1_000_000) * PRICE_PER_MTOK_CACHE_WRITE_USD + \
+           (cache_read_tokens / 1_000_000) * PRICE_PER_MTOK_CACHE_READ_USD
 
 
 def _read_log() -> list[dict]:

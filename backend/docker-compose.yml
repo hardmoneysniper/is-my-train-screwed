@@ -1,0 +1,10 @@
+services:
+  otp:
+    image: opentripplanner/opentripplanner:2.7.0
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/otp:/var/opentripplanner
+    command: ["--build", "--serve"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
