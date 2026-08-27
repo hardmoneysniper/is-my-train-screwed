@@ -29,6 +29,10 @@ The original sketch assumed a live subway GTFS-RT collector (`nyct-gtfs`, decodi
 5. No new corridors beyond Q70/M60 until the user's own rider survey identifies specific ones.
 6. `StopIndex` gets wired up.
 
+## Immediate: add Q102 to the bus collector
+
+`Q102` confirmed live in the real GTFS-RT feed as `Q102` — no SBS `+` suffix (checked directly; unlike `Q70+`/`M60+`, not all routes carry one). Add to `CORRIDORS` in `backend/collectors/bus_collector.py` and redeploy now, same as the interval change — more days collected before Task 4 runs is strictly better. Static routing for Q102 already works (Task 10 loaded all 6 bus feeds into OTP); this only affects real-time reliability collection.
+
 ## Tasks
 
 **1 — SQLite schema.** `backend/db.py`: `arrival_events` + `reliability_buckets` tables per spec §5.2, connection helper.
@@ -51,7 +55,16 @@ The original sketch assumed a live subway GTFS-RT collector (`nyct-gtfs`, decodi
 
 **10 — Deploy backend + OTP + DB + the aggregation cron.** Only the bus collector is deployed today; OTP is local-only (`docker compose`); there's no DB to deploy yet. Needs real research before a brief exists, not assumptions: Railway's private networking for OTP↔proxy (production can't use `host.docker.internal`, that's Docker-Desktop-local only), OTP's build cost/time on Railway's infra at its current size (7 static feeds + 150MB OSM extract + a live proxy — far more than the trivial single-process collector already deployed), volume persistence for OTP's graph data and the SQLite file, and realistic hosting cost at this new scale. Sequenced last — deploying before Tasks 1-9 are locally verified just moves debugging onto a slower loop.
 
-**11 — Provenance UI.** Trip cards + probability badges + tooltip ("42 min, but 30% chance you miss the Q70 connection — 3,400 observed F arrivals, last 30 days"). Follow the frontend-design skill first, same as Phase 1 Task 7 — this is new UI surface, not a tweak. Needs Task 8 (`/chat` live) and Tasks 6-7 (`get_risk` returning real data) to be testable end-to-end, so it's sequenced last.
+**11 — Inline probability citation (redesigned, no separate UI).** User decision, 2026-08-27: drop trip cards/badges entirely. The probability lives in the chat response's own prose, with one citation schema:
+- Every stated percentage gets a trailing `*` in the text itself, e.g. `30%*`.
+- The response ends with one footer line, on its own line, wrapped in single asterisks (markdown-italic convention): `*Based on 3,400 observed patterns in the last 30 days.*` — `n` and the window substituted from the real `get_risk` tool output, never invented.
+- One footer per response. If a response cites more than one probability (e.g. comparing two transfer options), default to the footer citing whichever risk figure is the response's primary answer — flag this as a real edge case to confirm at brief-writing time if it comes up in testing, not a hidden assumption.
+
+Two pieces of work, not one:
+- Backend: extend `ConversationAgent`'s `SYSTEM_PROMPT` with this exact format (a literal example, not a vague description — Haiku follows a shown template far more reliably than a described one). No change to the hard rule: the agent still narrates only `get_risk`'s real output, this only constrains how.
+- Frontend: `App.tsx`'s message rendering is plain text today (`{m.text}` in a `white-space: pre-wrap` div, Phase 1 Task 7) — it has no markdown handling at all. Needs one small, targeted addition: detect a trailing `*...*`-wrapped line and render it distinctly (smaller, italic), leave everything else as plain text. Not a general markdown renderer/library — one pattern, matching this project's existing minimalism.
+
+No frontend-design skill needed — this is a small addition to the existing bubble, not new UI surface. Sequenced last since it needs Task 8 (`/chat` live) and Tasks 6-7 (`get_risk` returning real data) to be testable end-to-end with a real response.
 
 ## Execution
 
