@@ -46,6 +46,7 @@ The original sketch assumed a live subway GTFS-RT collector (`nyct-gtfs`, decodi
 **5 — Nightly aggregation.** `backend/scripts/aggregate_reliability_buckets.py`. Folds a day's `arrival_events` into `reliability_buckets` per `(agency, route_id, stop_id, direction, day_type, hour_bucket, stat_type)`, exponential decay (`hist = 0.95·hist + 0.05·yesterday`, `n` decayed the same way). Runs as a Railway cron service (Task 10 deploys it), not manually.
 
 **6 — `get_risk`.** `backend/app/risk_engine.py` — pure function, no LLM. Finds transfer points in an `Itinerary`, pulls incoming-arrival + outgoing-headway distributions from `reliability_buckets`, Monte Carlo (~1000 draws) → `{p_miss, n, window_days, quality}`. `quality: "insufficient"` when `n < 200`.
+- Deferred, not part of this task's build (user decision 2026-08-29, see `README.md`): M→Q70 (weekday) and R→Q70 (weekend) get a precomputed result checked ahead of the live path, once 30+ days of data exist. Design `get_risk` so that slot is easy to add later (e.g. a small lookup keyed on `(route_pair, day_type)` checked before the live Monte Carlo path) without building the precompute mechanism itself now — there's no data to run it against yet.
 
 **7 — Wire `get_risk` into the Conversation Agent.** New `GET_RISK_TOOL` (matches `PLAN_ROUTE_TOOL`'s existing pattern). Agent calls it after `plan_route`, narrates the result, computes nothing itself.
 
