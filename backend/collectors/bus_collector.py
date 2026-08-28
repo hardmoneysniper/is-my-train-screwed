@@ -30,7 +30,10 @@ from pathlib import Path
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q70+", "M60+"]  # spec §2 seed set; Roosevelt Island Tram is static-schedule, not collected here
+CORRIDORS = ["Q70+", "M60+", "Q102"]  # spec §2 seed set + Q102 (user, 2026-08-29); Roosevelt
+# Island Tram is static-schedule, not collected here. Q102's real route_id confirmed live
+# as "Q102" -- no SBS "+" suffix, unlike Q70+/M60+ (checked directly, not assumed from
+# that pattern; not every route carries one).
 # Note: the M subway line (as in an M-train -> Q70 transfer) is NOT added here --
 # subway isn't corridor-filtered like bus. It's covered system-wide by the Phase 2
 # subwaydata.nyc ingestion pipeline instead (see docs/superpowers/plans/
