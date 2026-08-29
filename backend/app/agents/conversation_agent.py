@@ -3,7 +3,8 @@ import json
 from anthropic import AsyncAnthropic
 from app.config import settings
 from app.routing.otp_client import OTPClient
-from app.agents.tools import GET_RISK_TOOL, PLAN_ROUTE_TOOL
+from app.routing.nearest_stop import get_stop_index
+from app.agents.tools import FIND_STOP_TOOL, GET_RISK_TOOL, PLAN_ROUTE_TOOL
 from app.models.transit import Itinerary
 from app import risk_engine
 import cost_guard
@@ -16,6 +17,9 @@ SYSTEM_PROMPT = (
     "entries, narrate each using its exact p_miss/n/window_days; if an "
     "entry's quality is 'insufficient', say reliability data isn't "
     "available yet for that transfer rather than stating a number. "
+    "If the user names a place instead of giving coordinates, call "
+    "find_stop first to resolve it, then use the result's lat/lon with "
+    "plan_route — never invent coordinates. "
     "Keep answers to 1-3 sentences."
 )
 
@@ -41,7 +45,7 @@ class ConversationAgent:
             model=settings.conversation_agent_model,
             max_tokens=512,
             system=_SYSTEM_BLOCKS,
-            tools=[PLAN_ROUTE_TOOL, GET_RISK_TOOL],
+            tools=[PLAN_ROUTE_TOOL, GET_RISK_TOOL, FIND_STOP_TOOL],
             messages=messages,
         )
         # Raises CostCapExceeded if this call pushed month-to-date spend at
@@ -79,6 +83,9 @@ class ConversationAgent:
                     content = json.dumps([it.model_dump() for it in itineraries])
                 elif tool_use.name == "get_risk":
                     content = self._handle_get_risk(tool_use.input, last_itineraries)
+                elif tool_use.name == "find_stop":
+                    matches = get_stop_index().find_by_name(tool_use.input["query"])
+                    content = json.dumps(matches)
                 else:
                     content = json.dumps({"error": f"unknown tool: {tool_use.name}"})
                 tool_results.append({

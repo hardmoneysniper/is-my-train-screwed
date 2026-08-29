@@ -1,5 +1,7 @@
 import csv
+import io
 import pathlib
+import zipfile
 from rtree import index as rtree_index
 from shapely.geometry import Point
 from shapely.ops import transform
@@ -38,6 +40,34 @@ class StopIndex:
                 })
         return cls(stops)
 
+    @classmethod
+    def from_gtfs_zips(cls, zip_paths: list[pathlib.Path]) -> "StopIndex":
+        """Build a combined index from stops.txt inside each of several
+        GTFS zip files (e.g. subway.zip + the 6 bus borough zips), merging
+        all stops into one list. Mirrors realtime_proxy.py's TripIndex
+        zip-reading pattern; parses rows the same way from_gtfs does."""
+        stops = []
+        for zip_path in zip_paths:
+            with zipfile.ZipFile(zip_path) as z:
+                with z.open("stops.txt") as f:
+                    for row in csv.DictReader(io.TextIOWrapper(f, encoding="utf-8")):
+                        stops.append({
+                            "stop_id": row["stop_id"],
+                            "stop_name": row["stop_name"],
+                            "lat": float(row["stop_lat"]),
+                            "lon": float(row["stop_lon"]),
+                        })
+        return cls(stops)
+
+    def find_by_name(self, query: str, limit: int = 20) -> list[dict]:
+        """Case-insensitive substring match of query against stop_name,
+        sorted alphabetically by stop_name, capped at limit. No fuzzy
+        matching or relevance ranking."""
+        query_lower = query.lower()
+        matches = [s for s in self._stops if query_lower in s["stop_name"].lower()]
+        matches.sort(key=lambda s: s["stop_name"])
+        return matches[:limit]
+
     def nearest(self, lat: float, lon: float, k: int = 1) -> list[dict]:
         query_point_m = transform(_TO_METERS, Point(lon, lat))
         results = []
@@ -47,3 +77,29 @@ class StopIndex:
             results.append({**stop, "distance_m": distance_m})
         results.sort(key=lambda s: s["distance_m"])
         return results
+
+
+_GTFS_DIR = pathlib.Path(__file__).parent.parent.parent / "data" / "gtfs"
+_GTFS_ZIP_NAMES = [
+    "subway.zip",
+    "bus.zip",
+    "bus_manhattan.zip",
+    "bus_bronx.zip",
+    "bus_brooklyn.zip",
+    "bus_queens.zip",
+    "bus_staten_island.zip",
+]
+
+_stop_index: StopIndex | None = None
+
+
+def get_stop_index() -> StopIndex:
+    """Lazily builds and caches the combined 7-feed StopIndex at module
+    level. ConversationAgent is instantiated fresh per HTTP request (Task
+    8), so this must NOT be rebuilt per-request -- built once on first call,
+    reused on every call after."""
+    global _stop_index
+    if _stop_index is None:
+        zip_paths = [_GTFS_DIR / name for name in _GTFS_ZIP_NAMES]
+        _stop_index = StopIndex.from_gtfs_zips(zip_paths)
+    return _stop_index

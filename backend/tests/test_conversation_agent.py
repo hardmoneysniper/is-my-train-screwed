@@ -299,3 +299,68 @@ async def test_get_risk_tool_result_is_json_serialized_transfer_risk_list():
     tool_result_content = tool_result_message["content"][0]["content"]
     import json
     assert json.loads(tool_result_content) == [fake_transfer_risk.model_dump()]
+
+
+@pytest.mark.asyncio
+async def test_respond_calls_find_stop_tool_with_llm_query_and_narrates_result():
+    fake_stop_matches = [
+        {"stop_id": "R01", "stop_name": "Roosevelt Island", "lat": 40.7597, "lon": -73.9532},
+    ]
+
+    find_stop_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("find_stop", "tool_1", {"query": "Roosevelt Island"})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Roosevelt Island is at 40.7597, -73.9532.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.get_stop_index") as mock_get_stop_index, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_get_stop_index.return_value.find_by_name.return_value = fake_stop_matches
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=[find_stop_response, final_response])
+
+        agent = ConversationAgent()
+        reply = await agent.respond("Where is Roosevelt Island?", conversation_history=[])
+
+    assert reply == "Roosevelt Island is at 40.7597, -73.9532."
+    mock_get_stop_index.return_value.find_by_name.assert_called_once_with("Roosevelt Island")
+
+    tool_result_message = mock_client.messages.create.call_args_list[1].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    import json
+    assert json.loads(tool_result_content) == fake_stop_matches
+
+
+@pytest.mark.asyncio
+async def test_find_stop_zero_matches_returns_honest_empty_list():
+    find_stop_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("find_stop", "tool_1", {"query": "Nonexistent Place"})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="I couldn't find that stop.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.get_stop_index") as mock_get_stop_index, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_get_stop_index.return_value.find_by_name.return_value = []
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=[find_stop_response, final_response])
+
+        agent = ConversationAgent()
+        await agent.respond("Where is Nonexistent Place?", conversation_history=[])
+
+    tool_result_message = mock_client.messages.create.call_args_list[1].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    import json
+    assert json.loads(tool_result_content) == []

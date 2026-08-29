@@ -14,6 +14,18 @@ PLAN_ROUTE_TOOL = {
     },
 }
 
+FIND_STOP_TOOL = {
+    "name": "find_stop",
+    "description": "Look up a subway or bus stop by name or partial name (e.g. 'Roosevelt Island', '86 St') to get its coordinates. Call this when the user names a place instead of giving exact coordinates, then use the returned stop's lat/lon with plan_route. Never guess coordinates yourself.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The place name or partial name to search for."},
+        },
+        "required": ["query"],
+    },
+}
+
 GET_RISK_TOOL = {
     "name": "get_risk",
     "description": "Check transfer-miss probability for the itinerary you just planned. Never estimate this yourself — always call this tool and narrate its exact result.",
