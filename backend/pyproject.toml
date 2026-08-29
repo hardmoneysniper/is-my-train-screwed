@@ -13,6 +13,7 @@ dependencies = [
     "pyproj>=3.6",
     "anthropic>=0.40",
     "gtfs-realtime-bindings>=1.0",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
