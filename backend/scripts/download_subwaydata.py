@@ -1,3 +1,4 @@
+import os
 import pathlib
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -34,12 +35,24 @@ def check_day_available(url: str) -> bool | None:
 
 
 def download_subwaydata_day(url: str, dest: pathlib.Path) -> pathlib.Path:
+    """Streams to a .tmp sibling and atomically renames into place only after
+    a full, successful download -- so a mid-download interruption (network
+    drop, Ctrl+C, laptop sleep) can never leave a truncated file at `dest`
+    for the idempotency check (`dest.exists()`) to mistake for complete and
+    silently skip forever. Matches bus_collector.py's convention of never
+    letting a partially-written file be mistaken for a finished one."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.stream("GET", url, follow_redirects=True, timeout=120) as response:
-        response.raise_for_status()
-        with open(dest, "wb") as f:
-            for chunk in response.iter_bytes():
-                f.write(chunk)
+    tmp_dest = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        with httpx.stream("GET", url, follow_redirects=True, timeout=120) as response:
+            response.raise_for_status()
+            with open(tmp_dest, "wb") as f:
+                for chunk in response.iter_bytes():
+                    f.write(chunk)
+        os.replace(tmp_dest, dest)
+    except BaseException:
+        tmp_dest.unlink(missing_ok=True)
+        raise
     return dest
 
 

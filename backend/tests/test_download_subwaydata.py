@@ -110,3 +110,36 @@ def test_download_subwaydata_day_streams_to_destination_and_creates_parent_dir(t
     mock_stream.assert_called_once()
     assert result == dest
     assert dest.read_bytes() == b"chunk1chunk2"
+
+
+def test_download_subwaydata_day_leaves_no_corrupt_file_on_interrupted_stream(tmp_path):
+    """A mid-download interruption (network drop, Ctrl+C, laptop sleep) must
+    never leave a truncated file at `dest` -- that would be silently and
+    permanently mistaken for "already downloaded" by run_backfill's
+    dest.exists() idempotency check."""
+    dest = tmp_path / "2026-08-28.tar.xz"
+
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+
+    def raising_iter_bytes():
+        yield b"partial-chunk"
+        raise httpx.ReadTimeout("connection dropped mid-stream")
+
+    fake_response.iter_bytes.return_value = raising_iter_bytes()
+
+    class FakeStreamCtx:
+        def __enter__(self):
+            return fake_response
+
+        def __exit__(self, *exc):
+            return False
+
+    from scripts.download_subwaydata import download_subwaydata_day
+
+    with patch("scripts.download_subwaydata.httpx.stream", return_value=FakeStreamCtx()):
+        with pytest.raises(httpx.ReadTimeout):
+            download_subwaydata_day("https://example.com/x.tar.xz", dest)
+
+    assert not dest.exists()
+    assert not dest.with_suffix(dest.suffix + ".tmp").exists()
