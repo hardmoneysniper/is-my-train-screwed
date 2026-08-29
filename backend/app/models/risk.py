@@ -47,7 +47,11 @@ class ReliabilityBucket(BaseModel):
     hour_bucket: int
     stat_type: Literal["headway", "delay", "prediction_error"]
     histogram: dict
-    n_observations: int
-    n_ambiguous: int
+    # float, not int: Task 5's nightly decay (0.95*old + 0.05*today) applied
+    # to n the same way as the histogram makes these genuinely fractional
+    # after the first fold (e.g. 0.95), so a strict int field would raise
+    # ValidationError on real decayed rows.
+    n_observations: float
+    n_ambiguous: float
     window_start: date
     last_updated: datetime

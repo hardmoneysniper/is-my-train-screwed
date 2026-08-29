@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from app.models.risk import ReliabilityBucket
 from db import get_connection
 from scripts.aggregate_reliability_buckets import HIST_CONFIG, run_aggregate
 
@@ -294,3 +295,31 @@ def test_backlog_of_multiple_unprocessed_days_all_get_folded(conn):
     bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
     # day1 creates the bucket fresh, day2 decays it in the same run.
     assert bucket["n_observations"] == pytest.approx(0.95 * 1 + 0.05 * 1)
+
+
+def test_decayed_row_round_trips_through_reliability_bucket_model(conn):
+    # Regression test for a latent bug: ReliabilityBucket.n_observations /
+    # n_ambiguous used to be typed `int`, but the decay formula
+    # (0.95*old + 0.05*today) produces genuinely fractional values as soon
+    # as two days for the same key contribute different counts -- a
+    # strict-int Pydantic field raises ValidationError on that row, which
+    # would have surfaced as a latent crash in Task 6's get_risk. Day 1
+    # contributes 1 observation, day 2 contributes 3 for the SAME key, so
+    # the decayed n_observations is 0.95*1 + 0.05*3 = 1.1 -- not an
+    # integer, and not coincidentally so.
+    day1 = date(2026, 8, 24)
+    day2 = date(2026, 8, 25)
+    _insert_event(conn, delay_seconds=45, service_date=day1, vehicle_id="F_1")
+    for i, vid in enumerate(["F_2", "F_3", "F_4"]):
+        _insert_event(conn, delay_seconds=45, service_date=day2, vehicle_id=vid)
+
+    run_aggregate(conn)
+
+    bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
+    assert bucket["n_observations"] == pytest.approx(0.95 * 1 + 0.05 * 3)
+    assert bucket["n_observations"] != int(bucket["n_observations"])  # genuinely fractional
+
+    row_dict = dict(bucket)  # already has histogram as a decoded dict, matching model shape
+    validated = ReliabilityBucket.model_validate(row_dict)
+    assert validated.n_observations == pytest.approx(1.1)
+    assert validated.n_ambiguous == pytest.approx(0.0)
