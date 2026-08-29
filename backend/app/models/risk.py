@@ -55,3 +55,22 @@ class ReliabilityBucket(BaseModel):
     n_ambiguous: float
     window_start: date
     last_updated: datetime
+
+
+class TransferRisk(BaseModel):
+    """Per-transfer result from `get_risk` (Task 6) -- one entry per
+    transfer point in an itinerary, in itinerary order. `p_miss` and the
+    rest of the Monte Carlo output are only meaningful when
+    `quality == "ok"`; `quality == "insufficient"` always pairs with
+    `p_miss = None` -- never a fabricated/placeholder number (CLAUDE.md's
+    "LLM agents never compute numbers" rule extends to this function:
+    nothing downstream may mistake a placeholder for a real probability).
+    """
+
+    from_route: str  # OTP-visible short name, e.g. "F" or "Q70-SBS" -- for narration only
+    to_route: str
+    transfer_stop_name: str  # human-readable, e.g. "Roosevelt Island"
+    p_miss: float | None
+    n: float  # min(n_observations) across the required buckets; 0 if a bucket was missing
+    window_days: int
+    quality: Literal["ok", "insufficient"]
