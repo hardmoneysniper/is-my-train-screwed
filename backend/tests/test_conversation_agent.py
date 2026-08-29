@@ -3,6 +3,30 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 import cost_guard
 from app.agents.conversation_agent import ConversationAgent
+from app.models.transit import Itinerary, Leg
+from app.models.risk import TransferRisk
+
+
+def _fake_itinerary():
+    return Itinerary(
+        duration_seconds=1800,
+        legs=[
+            Leg(mode="SUBWAY", route_short_name="F", from_stop_name="Roosevelt Island",
+                to_stop_name="Lex/63", from_stop_id="mtasbwy:R01", to_stop_id="mtasbwy:R02",
+                start_time_ms=0, end_time_ms=1000),
+        ],
+    )
+
+
+def _tool_use(name, id, input):
+    # MagicMock(name=...) is a constructor-only special case (it sets the
+    # mock's repr name, not a readable .name attribute) -- assign .name as
+    # a plain attribute after construction so tool_use.name actually reads
+    # back the tool name string, which conversation_agent.py's dispatch
+    # now depends on.
+    block = MagicMock(type="tool_use", id=id, input=input)
+    block.name = name
+    return block
 
 
 def _fake_usage(input_tokens=100, output_tokens=20, cache_creation=0, cache_read=0):
@@ -28,8 +52,7 @@ def isolated_cost_log(tmp_path, monkeypatch):
 async def test_respond_calls_plan_route_tool_and_narrates_result():
     fake_tool_use_response = MagicMock(
         stop_reason="tool_use",
-        content=[MagicMock(type="tool_use", name="plan_route", id="tool_1",
-                            input={"from_lat": 40.7597, "from_lon": -73.9532,
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
                                    "to_lat": 40.7644, "to_lon": -73.9656})],
         usage=_fake_usage(),
     )
@@ -80,3 +103,199 @@ async def test_respond_propagates_cost_cap_exceeded():
         agent = ConversationAgent()
         with pytest.raises(cost_guard.CostCapExceeded):
             await agent.respond("How do I get from Roosevelt Island to Lex/63?", conversation_history=[])
+
+
+@pytest.mark.asyncio
+async def test_respond_calls_get_risk_with_real_itinerary_from_plan_route():
+    itinerary = _fake_itinerary()
+    fake_transfer_risk = TransferRisk(
+        from_route="F", to_route="Q", transfer_stop_name="Roosevelt Island",
+        p_miss=0.12, n=500, window_days=14, quality="ok",
+    )
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_2", {})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="12% chance of missing your transfer.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = [itinerary]
+        mock_get_risk.return_value = [fake_transfer_risk]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, get_risk_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        reply = await agent.respond("How do I get from Roosevelt Island to Lex/63?", conversation_history=[])
+
+    assert reply == "12% chance of missing your transfer."
+    mock_get_risk.assert_called_once()
+    # Must be the exact Itinerary object plan_route returned, not a
+    # re-parsed copy and not anything the LLM supplied in its tool_use input.
+    (called_itinerary,), _ = mock_get_risk.call_args
+    assert called_itinerary is itinerary
+
+
+@pytest.mark.asyncio
+async def test_get_risk_itinerary_index_omitted_defaults_to_zero():
+    itinerary_0 = _fake_itinerary()
+    itinerary_1 = _fake_itinerary()
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_2", {})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="ok")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = [itinerary_0, itinerary_1]
+        mock_get_risk.return_value = []
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, get_risk_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        await agent.respond("plan a trip", conversation_history=[])
+
+    (called_itinerary,), _ = mock_get_risk.call_args
+    assert called_itinerary is itinerary_0
+
+
+@pytest.mark.asyncio
+async def test_get_risk_with_no_prior_plan_route_returns_honest_error():
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_1", {})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="I need to plan a route first.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=[get_risk_response, final_response])
+
+        agent = ConversationAgent()
+        await agent.respond("what's the risk?", conversation_history=[])
+
+    mock_get_risk.assert_not_called()
+    tool_result_message = mock_client.messages.create.call_args_list[1].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    assert "no itinerary available" in tool_result_content
+
+
+@pytest.mark.asyncio
+async def test_get_risk_with_out_of_range_index_returns_honest_error():
+    itinerary = _fake_itinerary()
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_2", {"itinerary_index": 5})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="That option doesn't exist.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = [itinerary]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, get_risk_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        await agent.respond("check option 5", conversation_history=[])
+
+    mock_get_risk.assert_not_called()
+    tool_result_message = mock_client.messages.create.call_args_list[2].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    assert "no itinerary available" in tool_result_content
+
+
+@pytest.mark.asyncio
+async def test_get_risk_tool_result_is_json_serialized_transfer_risk_list():
+    itinerary = _fake_itinerary()
+    fake_transfer_risk = TransferRisk(
+        from_route="F", to_route="Q", transfer_stop_name="Roosevelt Island",
+        p_miss=0.12, n=500, window_days=14, quality="ok",
+    )
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_2", {})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="12% chance of missing your transfer.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = [itinerary]
+        mock_get_risk.return_value = [fake_transfer_risk]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, get_risk_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        await agent.respond("plan and check risk", conversation_history=[])
+
+    tool_result_message = mock_client.messages.create.call_args_list[2].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    import json
+    assert json.loads(tool_result_content) == [fake_transfer_risk.model_dump()]
