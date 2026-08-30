@@ -87,6 +87,18 @@ body {
   border-bottom-left-radius: 4px;
 }
 
+.bubble-footer {
+  /* Task 11 citation footer: a trailing "*...*" line, rendered distinctly
+     from the body -- smaller, italic, muted -- rather than as plain text.
+     Muted grey on the ink color, not a new hue, to match the palette
+     already established by --ink/--bubble-grey. */
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 0.8rem;
+  font-style: italic;
+  color: rgba(10, 10, 10, 0.55);
+}
+
 .composer {
   display: flex;
   gap: 10px;

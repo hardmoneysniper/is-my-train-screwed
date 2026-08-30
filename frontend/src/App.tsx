@@ -9,6 +9,28 @@ interface DisplayMessage {
   text: string
 }
 
+// Matches a whole line that is entirely wrapped in a single pair of
+// asterisks, e.g. "*Based on 500 observed patterns in the last 14 days.*"
+// -- the citation-footer convention from Task 11. Only ever applied to the
+// LAST line of a message (see splitFooter below); an interior line that
+// happens to look like this is left as plain text.
+const FOOTER_LINE_RE = /^\*(.+)\*$/
+
+// Splits a message body into its main text and an optional trailing
+// footer line. Returns `footer: null` unless the message's LAST line
+// matches FOOTER_LINE_RE, in which case `body` is everything before it
+// (trailing newline trimmed) and `footer` is that line with its wrapping
+// asterisks stripped.
+function splitFooter(text: string): { body: string; footer: string | null } {
+  const lines = text.split('\n')
+  const lastLine = lines[lines.length - 1]
+  const match = FOOTER_LINE_RE.exec(lastLine)
+  if (!match) {
+    return { body: text, footer: null }
+  }
+  return { body: lines.slice(0, -1).join('\n'), footer: match[1] }
+}
+
 export default function App() {
   const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [input, setInput] = useState('')
@@ -70,11 +92,20 @@ export default function App() {
 
       {started && (
         <div className="conversation">
-          {messages.map((m, i) => (
-            <div key={i} className={`bubble bubble-${m.role}`}>
-              {m.text}
-            </div>
-          ))}
+          {messages.map((m, i) => {
+            const { body, footer } = splitFooter(m.text)
+            return (
+              <div key={i} className={`bubble bubble-${m.role}`}>
+                {body}
+                {footer !== null && (
+                  <>
+                    {body && <br />}
+                    <span className="bubble-footer">{footer}</span>
+                  </>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

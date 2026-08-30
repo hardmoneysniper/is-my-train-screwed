@@ -76,4 +76,106 @@ describe('App', () => {
     // multi-line content is preserved in the sent bubble
     expect(document.querySelector('.bubble-user')?.textContent).toBe('line one\nline two')
   })
+
+  it('renders a trailing "*...*" line as a distinct footer element, asterisks stripped', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        reply: 'There is about a 12%* chance of missing that transfer.\n' +
+          '*Based on 500 observed patterns in the last 14 days.*',
+      }),
+    } as Response)
+
+    render(<App />)
+    fireEvent.change(screen.getByPlaceholderText(/ask about a trip/i), {
+      target: { value: 'What is the risk?' },
+    })
+    fireEvent.click(screen.getByText(/send/i))
+
+    await waitFor(() => {
+      expect(screen.getByText('Based on 500 observed patterns in the last 14 days.')).toBeInTheDocument()
+    })
+
+    const footerEl = screen.getByText('Based on 500 observed patterns in the last 14 days.')
+    expect(footerEl).toHaveClass('bubble-footer')
+    // Asterisks are stripped from the rendered footer text.
+    expect(footerEl.textContent).not.toContain('*')
+    // The body (with its inline %* citation) still renders as plain text.
+    expect(screen.getByText(/12%\*/)).toBeInTheDocument()
+  })
+
+  it('renders a message without a trailing "*...*" line identically to plain text (no regression)', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ reply: "Hi! I'm your NYC transit trip advisor." }),
+    } as Response)
+
+    render(<App />)
+    fireEvent.change(screen.getByPlaceholderText(/ask about a trip/i), {
+      target: { value: 'hello' },
+    })
+    fireEvent.click(screen.getByText(/send/i))
+
+    await waitFor(() => {
+      expect(screen.getByText("Hi! I'm your NYC transit trip advisor.")).toBeInTheDocument()
+    })
+
+    // No footer element appears anywhere, and the assistant bubble's full
+    // text content is exactly the plain reply -- no stray <br> or wrapper.
+    expect(document.querySelector('.bubble-footer')).not.toBeInTheDocument()
+    const assistantBubble = document.querySelector('.bubble-assistant')
+    expect(assistantBubble?.textContent).toBe("Hi! I'm your NYC transit trip advisor.")
+  })
+
+  it('does not treat an interior line that looks like "*something*" as the footer', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        reply: '*not a footer*\nThis is the real last line, plain text.',
+      }),
+    } as Response)
+
+    render(<App />)
+    fireEvent.change(screen.getByPlaceholderText(/ask about a trip/i), {
+      target: { value: 'test interior line' },
+    })
+    fireEvent.click(screen.getByText(/send/i))
+
+    await waitFor(() => {
+      expect(screen.getByText(/this is the real last line/i)).toBeInTheDocument()
+    })
+
+    // The interior "*not a footer*" line is not pulled out into a distinct
+    // footer element -- only the LAST line is ever eligible.
+    expect(document.querySelector('.bubble-footer')).not.toBeInTheDocument()
+    const assistantBubble = document.querySelector('.bubble-assistant')
+    expect(assistantBubble?.textContent).toBe(
+      '*not a footer*\nThis is the real last line, plain text.'
+    )
+  })
+
+  it('renders multiple inline %*-suffixed percentages in the body as plain text', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        reply: 'Option A is 30%* risky, option B is 12%* risky.\n' +
+          '*Based on 500 observed patterns in the last 14 days.*',
+      }),
+    } as Response)
+
+    render(<App />)
+    fireEvent.change(screen.getByPlaceholderText(/ask about a trip/i), {
+      target: { value: 'compare options' },
+    })
+    fireEvent.click(screen.getByText(/send/i))
+
+    await waitFor(() => {
+      expect(screen.getByText(/option a is 30%\*/i)).toBeInTheDocument()
+    })
+
+    // Both inline %* citations render untouched as part of the plain body.
+    expect(screen.getByText(/option a is 30%\* risky, option b is 12%\* risky\./i)).toBeInTheDocument()
+    // Exactly one footer element for the whole message.
+    expect(document.querySelectorAll('.bubble-footer')).toHaveLength(1)
+  })
 })

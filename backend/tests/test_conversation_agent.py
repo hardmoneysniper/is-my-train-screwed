@@ -338,6 +338,69 @@ async def test_respond_calls_find_stop_tool_with_llm_query_and_narrates_result()
 
 
 @pytest.mark.asyncio
+async def test_system_prompt_carries_citation_format_and_get_risk_data_flows_through():
+    # This tests that the SYSTEM_PROMPT (as actually sent to messages.create)
+    # carries the '%*' + footer citation format instructions, and that a
+    # mocked 'quality: ok' get_risk result flows through respond() unmodified
+    # -- it does NOT prove Haiku follows the format (that needs a live call,
+    # see task-11-report.md), only that the prompt content and tool-result
+    # plumbing are correct.
+    itinerary = _fake_itinerary()
+    fake_transfer_risk = TransferRisk(
+        from_route="F", to_route="Q", transfer_stop_name="Roosevelt Island",
+        p_miss=0.12, n=500, window_days=14, quality="ok",
+    )
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    get_risk_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("get_risk", "tool_2", {})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(
+            type="text",
+            text="There's about a 12%* chance of missing that transfer.\n"
+                 "*Based on 500 observed patterns in the last 14 days.*",
+        )],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = [itinerary]
+        mock_get_risk.return_value = [fake_transfer_risk]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, get_risk_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        reply = await agent.respond("plan and check risk", conversation_history=[])
+
+    assert reply == (
+        "There's about a 12%* chance of missing that transfer.\n"
+        "*Based on 500 observed patterns in the last 14 days.*"
+    )
+
+    # Every messages.create call carries the same cached system prompt, and
+    # it contains the citation-format rule and its trailing-'*' example --
+    # a regression here (e.g. reverting to Task 7's prompt) would silently
+    # drop the format instruction Haiku is supposed to follow.
+    for call in mock_client.messages.create.call_args_list:
+        system_text = call.kwargs["system"][-1]["text"]
+        assert "%*" in system_text
+        assert "Based on {n} observed patterns in the last {window_days} days." in system_text
+
+
+@pytest.mark.asyncio
 async def test_find_stop_zero_matches_returns_honest_empty_list():
     find_stop_response = MagicMock(
         stop_reason="tool_use",
