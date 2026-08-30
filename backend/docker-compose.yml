@@ -14,3 +14,9 @@ services:
       # OTP itself substitutes ${MTA_BUSTIME_API_KEY} in router-config.json
       # natively (its own env-var interpolation, applied before parsing).
       - MTA_BUSTIME_API_KEY=${MTA_BUSTIME_API_KEY}
+      # Same OTP-native substitution for the subway updaters' base URL.
+      # Local dev value here keeps behavior identical to the old hardcoded
+      # "http://host.docker.internal:8090" -- Railway's deployed OTP
+      # service sets this to the backend service's private-networking
+      # address instead (http://backend.railway.internal:8000/proxy).
+      - REALTIME_PROXY_BASE_URL=http://host.docker.internal:8090

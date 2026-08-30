@@ -3,56 +3,56 @@
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/ace",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/ace",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/bdfm",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/bdfm",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/g",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/g",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/jz",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/jz",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/nqrw",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/nqrw",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/l",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/l",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/numbered",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/numbered",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
     {
       "type": "stop-time-updater",
       "frequency": "30s",
-      "url": "http://host.docker.internal:8090/rt/si",
+      "url": "${REALTIME_PROXY_BASE_URL}/rt/si",
       "feedId": "MTA_NYCT_Subway",
       "fuzzyTripMatching": true
     },
