@@ -2,6 +2,7 @@ import pathlib
 import shutil
 
 from scripts.filter_gtfs_by_route import filter_gtfs_by_route
+from scripts.trim_osm_extract import trim_osm_extract
 
 ROOT = pathlib.Path(__file__).parent.parent
 OTP_CONFIG_DIR = ROOT / "otp_config"
@@ -48,13 +49,21 @@ def main():
             )
         filter_gtfs_by_route(src, OTP_DATA_DIR / out_name, route_ids)
 
-    osm_dest = OTP_DATA_DIR / "NewYork.osm.pbf"
-    if not osm_dest.exists():
+    osm_src = OTP_DATA_DIR / "NewYork.osm.pbf"
+    if not osm_src.exists():
         raise SystemExit(
-            f"Missing {osm_dest} -- download it from "
+            f"Missing {osm_src} -- download it from "
             "https://download.bbbike.org/osm/bbbike/NewYork/NewYork.osm.pbf "
             "(~150MB) before running this script."
         )
+    osm_trimmed = OTP_DATA_DIR / "NewYork_trimmed.osm.pbf"
+    if not osm_trimmed.exists():
+        # Excludes Staten Island and most of the Bronx -- see
+        # trim_osm_extract.py's docstring for why and the exact bbox.
+        # Slow (a couple of minutes over the full 152MB extract), so this
+        # only runs once; skip on repeat invocations once the trimmed
+        # file already exists.
+        trim_osm_extract(osm_src, osm_trimmed)
 
     shutil.copyfile(OTP_CONFIG_DIR / "build-config.json", OTP_DATA_DIR / "build-config.json")
     # router-config.json's ${MTA_BUSTIME_API_KEY} is OTP's own env-var

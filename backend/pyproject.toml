@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "osmium>=4.3"]
 
 [tool.setuptools]
 packages = ["app"]

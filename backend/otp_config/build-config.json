@@ -1,7 +1,7 @@
 {
   "osm": [
     {
-      "source": "file:///var/opentripplanner/NewYork.osm.pbf"
+      "source": "file:///var/opentripplanner/NewYork_trimmed.osm.pbf"
     }
   ],
   "transitFeeds": [
