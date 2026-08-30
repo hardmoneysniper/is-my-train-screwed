@@ -51,6 +51,18 @@ AMBIGUOUS_GAP_SECONDS = 90
 PREDICTION_TOLERANCE_SECONDS = 90
 PREDICTION_LOOKBACK_SECONDS = 300
 
+# Every field this module's state machine reads off a tripUpdates record
+# (final whole-branch review, Minor #4). A parseable-JSON line missing any
+# of these would otherwise crash the whole day's processing via direct
+# dict indexing (e.g. record["route_id"]) -- unlike a malformed-JSON line,
+# which is already skipped gracefully below. Low real-world likelihood
+# (the production collector always emits these), but this runs unattended
+# over weeks of backfill data, so skip-and-log rather than crash, matching
+# the malformed-line handling's spirit. `predicted_arrival_ts` is
+# deliberately excluded -- it's genuinely optional (`.get(...)` with a
+# None fallback is the correct, existing behavior for it).
+REQUIRED_TRIP_UPDATE_FIELDS = ("polled_at", "route_id", "direction", "trip_id", "vehicle_id", "stop_id")
+
 
 @dataclass
 class _TrackedStop:
@@ -101,6 +113,14 @@ def _iter_trip_update_records(path: Path):
                 )
                 continue
             if record.get("raw_source") != "tripUpdates":
+                continue
+            missing = [f for f in REQUIRED_TRIP_UPDATE_FIELDS if record.get(f) is None]
+            if missing:
+                print(
+                    f"[derive_bus_arrival_events] {path.name}:{line_num} "
+                    f"tripUpdates record missing field(s) {missing}, skipping",
+                    file=sys.stderr,
+                )
                 continue
             yield record
 

@@ -211,6 +211,33 @@ def _monte_carlo_p_miss(incoming_histogram: dict, outgoing_histogram: dict, buff
     return misses / draws
 
 
+def _incoming_stat_type(agency_i: str) -> str:
+    """Which stat_type the incoming leg's bucket is fetched from -- this is
+    the fix for a real cross-task gap (final whole-branch review, Critical
+    finding): Task 3 (subway ingestion) hardcodes
+    `predicted_arrival_ts_at_T_minus_5 = None` for every subway event
+    (correct -- subwaydata.nyc has no such field, and there's no live
+    subway GTFS-RT collector), which means the aggregator (Task 5) never
+    creates a `prediction_error` bucket for `agency='subway'`, ever. Task 6
+    originally hardcoded `"prediction_error"` for the incoming leg
+    regardless of agency -- individually reasonable, but the two decisions
+    don't compose: every subway-incoming transfer was permanently stuck at
+    `quality="insufficient"`, including this product's own beachhead
+    Roosevelt Island F->Q transfer.
+
+    Subway *does* have real, populated data for a different stat --
+    `delay_seconds` (observed vs. static schedule), folded into `delay`
+    buckets -- so subway's incoming leg reads `"delay"` instead. Bus is
+    unaffected: Task 4 deliberately leaves `delay_seconds` NULL for every
+    bus event (no static-schedule matching was in scope), so bus has no
+    `delay` buckets at all -- `"prediction_error"` remains bus's only real
+    incoming-spread source and stays the primary (and only) choice for it.
+    Both stats share the identical histogram shape (30s bins, -10min to
+    +40min, task-5-brief.md), so no change to the Monte Carlo sampling
+    itself is needed -- only which bucket gets fetched."""
+    return "delay" if agency_i == "subway" else "prediction_error"
+
+
 def _compute_transfer_risk(
     conn: sqlite3.Connection,
     agency_i: str,
@@ -229,23 +256,30 @@ def _compute_transfer_risk(
     # -> precomputed TransferRisk lookup here, before falling through to the live
     # Monte Carlo path below.
 
-    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket, "prediction_error")
+    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket, _incoming_stat_type(agency_i))
     outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type, hour_bucket, "headway")
 
     incoming_n = incoming["n_observations"] if incoming else 0.0
     outgoing_n = outgoing["n_observations"] if outgoing else 0.0
+    n = min(incoming_n, outgoing_n)
+    window_days_incoming = _window_days(incoming["window_start"]) if incoming else 0
+    window_days_outgoing = _window_days(outgoing["window_start"]) if outgoing else 0
+    window_days = min(window_days_incoming, window_days_outgoing)
 
     if incoming is None or outgoing is None or incoming_n < MIN_N_OBSERVATIONS or outgoing_n < MIN_N_OBSERVATIONS:
-        n = min(incoming_n, outgoing_n)
-        window_days_incoming = _window_days(incoming["window_start"]) if incoming else 0
-        window_days_outgoing = _window_days(outgoing["window_start"]) if outgoing else 0
-        return None, n, min(window_days_incoming, window_days_outgoing), "insufficient"
+        return None, n, window_days, "insufficient"
 
     incoming_histogram = json.loads(incoming["histogram"])
     outgoing_histogram = json.loads(outgoing["histogram"])
+    # Cheap insurance (final whole-branch review, Minor #2): random.choices
+    # raises if every weight is zero. Confirmed unreachable with real data
+    # today (the aggregator increments counts and n_observations in
+    # lockstep, so n_observations >= MIN_N_OBSERVATIONS implies a non-empty
+    # histogram) -- but an all-zero histogram is just as "no real signal"
+    # as a missing bucket, so degrade the same way rather than crash.
+    if sum(incoming_histogram["counts"]) == 0 or sum(outgoing_histogram["counts"]) == 0:
+        return None, n, window_days, "insufficient"
     p_miss = _monte_carlo_p_miss(incoming_histogram, outgoing_histogram, buffer_seconds)
-    n = min(incoming_n, outgoing_n)
-    window_days = min(_window_days(incoming["window_start"]), _window_days(outgoing["window_start"]))
     return p_miss, n, window_days, "ok"
 
 

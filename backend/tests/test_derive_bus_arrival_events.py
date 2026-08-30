@@ -291,6 +291,32 @@ def test_rerunning_already_ingested_day_is_a_noop(tmp_path, conn):
     assert len(_all_events(conn)) == 1
 
 
+def test_trip_update_line_missing_required_field_is_skipped_not_crashed(tmp_path, conn, capsys):
+    # Final whole-branch review, Minor #4: a parseable-JSON tripUpdates line
+    # missing a field this module directly indexes (e.g. "route_id") must
+    # be skipped with a logged warning, like a malformed-JSON line already
+    # is -- not crash the whole day via a raw KeyError.
+    good_record = _record(T0, stop_id="S1", vehicle_id="V10")
+    bad_record = _record(T0 + timedelta(seconds=30), stop_id="S2", vehicle_id="V10")
+    del bad_record["route_id"]
+    records = [
+        good_record,
+        bad_record,
+        _record(T0 + timedelta(seconds=60), stop_id="S3", vehicle_id="V10"),
+    ]
+    raw_path = tmp_path / f"{SERVICE_DATE.isoformat()}.ndjson"
+    _write_ndjson(raw_path, records)
+
+    process_day(conn, raw_path, SERVICE_DATE)
+
+    # The bad line drops out entirely (never marks S2 as tracked), so S1's
+    # passage is observed at the S3 poll, not the (skipped) S2 one.
+    events = _all_events(conn)
+    assert len(events) == 1
+    assert events[0]["stop_id"] == "S1"
+    assert "missing field" in capsys.readouterr().err
+
+
 def test_run_derive_processes_both_ndjson_and_gz_files_in_directory(tmp_path, conn):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()

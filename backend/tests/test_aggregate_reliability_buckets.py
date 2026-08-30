@@ -264,6 +264,74 @@ def test_delay_above_40_minutes_clips_to_last_bin(conn):
     assert bucket["histogram"]["counts"][n_bins - 1] == 1.0
 
 
+def test_direction_suffixed_stop_ids_never_collide_into_one_bucket_key(conn):
+    """Final whole-branch review, Important item. Locks in a confirmed-live
+    assumption (checked directly against a real subwaydata.nyc sample day's
+    stop_times.csv during Task 3's brief-writing, not previously covered by
+    a test): subway `stop_id` is already platform-level and N/S-suffixed
+    (e.g. "901N"/"902N"), never a parent-station id shared by both
+    directions.
+
+    This matters because `risk_engine._fetch_subway_bucket` queries
+    reliability_buckets by (agency, route_id, stop_id, day_type,
+    hour_bucket, stat_type) with NO direction filter at all -- it trusts
+    stop_id alone to disambiguate direction, and treats 2+ matching rows as
+    unmatchable ("insufficient", never guesses). This test mirrors that
+    exact query shape. It deliberately gives both directions of the same
+    physical "901" station the SAME `direction` column value, so the only
+    thing keeping them apart is the stop_id suffix -- if subwaydata.nyc's
+    stop_id were ever parent-station-level instead, both events would
+    collapse into one bucket key (one row, 2 merged observations) and this
+    test would fail.
+    """
+    _insert_event(
+        conn,
+        route_id="1",
+        stop_id="901N",
+        direction="0",
+        delay_seconds=30,
+        vehicle_id="V_N",
+    )
+    _insert_event(
+        conn,
+        route_id="1",
+        stop_id="901S",
+        direction="0",  # deliberately identical to the row above
+        delay_seconds=300,
+        vehicle_id="V_S",
+    )
+    run_aggregate(conn)
+
+    # Mirrors risk_engine._fetch_subway_bucket's real query exactly (no
+    # direction filter) -- this is the actual dependency being tested.
+    def _fetch_no_direction_filter(stop_id):
+        return conn.execute(
+            """
+            SELECT * FROM reliability_buckets
+            WHERE agency = 'subway' AND route_id = ? AND stop_id = ?
+              AND day_type = ? AND hour_bucket = ? AND stat_type = ?
+            """,
+            ("1", stop_id, "weekday", 8, "delay"),
+        ).fetchall()
+
+    rows_n = _fetch_no_direction_filter("901N")
+    rows_s = _fetch_no_direction_filter("901S")
+
+    assert len(rows_n) == 1  # exactly one row -- not ambiguous
+    assert len(rows_s) == 1
+    hist_n = json.loads(rows_n[0]["histogram"])
+    hist_s = json.loads(rows_s[0]["histogram"])
+    assert rows_n[0]["n_observations"] == 1
+    assert rows_s[0]["n_observations"] == 1
+    idx_30 = (30 - HIST_CONFIG["delay"]["min_s"]) // HIST_CONFIG["delay"]["bin_width_s"]
+    idx_300 = (300 - HIST_CONFIG["delay"]["min_s"]) // HIST_CONFIG["delay"]["bin_width_s"]
+    assert hist_n["counts"][idx_30] == 1.0
+    assert hist_s["counts"][idx_300] == 1.0
+    # No cross-contamination between the two directions' histograms.
+    assert hist_n["counts"][idx_300] == 0.0
+    assert hist_s["counts"][idx_30] == 0.0
+
+
 def test_process_day_marks_processed_days(conn):
     _insert_event(conn)
     run_aggregate(conn)

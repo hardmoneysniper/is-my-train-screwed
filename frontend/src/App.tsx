@@ -93,6 +93,17 @@ export default function App() {
       {started && (
         <div className="conversation">
           {messages.map((m, i) => {
+            // splitFooter's citation-footer convention (Task 11) only ever
+            // applies to assistant replies -- a user who happens to type a
+            // line wrapped in single asterisks must see it rendered back
+            // exactly as typed, not split into a footer.
+            if (m.role !== 'assistant') {
+              return (
+                <div key={i} className={`bubble bubble-${m.role}`}>
+                  {m.text}
+                </div>
+              )
+            }
             const { body, footer } = splitFooter(m.text)
             return (
               <div key={i} className={`bubble bubble-${m.role}`}>

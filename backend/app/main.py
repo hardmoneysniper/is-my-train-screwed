@@ -10,6 +10,13 @@ from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_p
 from db import get_connection
 from scripts.aggregate_reliability_buckets import run_aggregate
 
+# Final whole-branch review, Minor #3: without an explicit basicConfig,
+# logging.exception below relies on Python's last-resort handler, which is
+# not guaranteed reliable output now that aggregation runs in-process
+# (rather than as its own more visible service). One line makes failure
+# logging dependable.
+logging.basicConfig(level=logging.INFO)
+
 # Task 10 brief: Railway can't share a volume across services, so the
 # nightly aggregation can't be a separate cron service the way the plan
 # originally described it (a cron service and this SQLite-backed backend

@@ -154,6 +154,29 @@ describe('App', () => {
     )
   })
 
+  it('does not split a footer out of a user message, even if it looks like one', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ reply: 'Sure, tell me more.' }),
+    } as Response)
+
+    render(<App />)
+    fireEvent.change(screen.getByPlaceholderText(/ask about a trip/i), {
+      target: { value: 'Line one\n*this looks like a footer*' },
+    })
+    fireEvent.click(screen.getByText(/send/i))
+
+    // The user bubble renders the raw text untouched -- no footer split,
+    // no <br> inserted, asterisks preserved.
+    const userBubble = document.querySelector('.bubble-user')
+    expect(userBubble?.textContent).toBe('Line one\n*this looks like a footer*')
+    expect(document.querySelector('.bubble-footer')).not.toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(screen.getByText(/sure, tell me more/i)).toBeInTheDocument()
+    })
+  })
+
   it('renders multiple inline %*-suffixed percentages in the body as plain text', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,

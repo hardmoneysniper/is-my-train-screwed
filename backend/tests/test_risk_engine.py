@@ -141,6 +141,13 @@ def test_all_walk_itinerary_returns_empty_list(conn, route_index):
 def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index):
     # Feed-prefix-stripped stop_ids ("MTA_NYCT_Subway:127N" -> "127N",
     # task-6-brief.md Gap 1) must match the bare stop_id buckets are keyed by.
+    # Incoming leg's agency is subway -> stat_type is "delay", not
+    # "prediction_error" (final whole-branch review Critical fix: subway
+    # never populates prediction_error, only delay -- see
+    # risk_engine._incoming_stat_type). This is the previously-impossible
+    # scenario: before the fix, a subway-incoming transfer could never
+    # reach quality="ok" no matter what data existed, because the lookup
+    # always asked for "prediction_error".
     _insert_bucket(
         conn,
         agency="subway",
@@ -148,7 +155,7 @@ def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index)
         stop_id="127N",
         day_type="weekday",
         hour_bucket=8,
-        stat_type="prediction_error",
+        stat_type="delay",
         histogram=json.dumps(
             {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
         ),
@@ -219,6 +226,148 @@ def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index)
     assert r.window_days == 20  # window_start is far enough in the past to hit the 20-day cap
 
 
+def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficient(conn, route_index):
+    """Directionality check for the Critical fix: proves the lookup
+    genuinely changed, not just that a "delay" bucket happens to also be
+    picked up. If only a "prediction_error" bucket exists for the subway
+    incoming leg (the pre-fix expectation, and the one real bus-incoming
+    transfers still use), the transfer must stay "insufficient" -- a
+    regression back to always reading "prediction_error" would make this
+    test start passing "ok" with a fabricated-looking histogram."""
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="prediction_error",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [500.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=500,
+    )
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 4 else 0.0 for i in range(81)]}
+        ),
+        n_observations=200,
+    )
+
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    assert results[0].quality == "insufficient"
+    assert results[0].p_miss is None
+
+
+def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_index):
+    """Confirms the Critical fix left bus behavior unchanged in the other
+    direction: bus's incoming leg must still read "prediction_error", not
+    "delay". Real bus data can never actually populate a "delay" bucket
+    (Task 4 leaves delay_seconds NULL for every bus event), but this test
+    plants one anyway to prove it is NOT picked up -- if it were, that
+    would mean the agency check in `_incoming_stat_type` is backwards."""
+    _insert_bucket(
+        conn,
+        agency="bus",
+        route_id="Q102",
+        stop_id="450154",
+        direction="0",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",  # bus never actually has this -- must be ignored
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [500.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=500,
+    )
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 4 else 0.0 for i in range(81)]}
+        ),
+        n_observations=200,
+    )
+
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="BUS",
+                route_short_name="Q102",
+                from_stop_id="MTABC:400000",
+                from_stop_name="Start",
+                to_stop_id="MTABC:450154",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    assert results[0].quality == "insufficient"
+    assert results[0].p_miss is None
+
+
+def test_incoming_stat_type_is_agency_dependent():
+    """Direct unit coverage of the Critical fix's selection function."""
+    assert risk_engine._incoming_stat_type("subway") == "delay"
+    assert risk_engine._incoming_stat_type("bus") == "prediction_error"
+
+
 # --- insufficient data: missing bucket, or n < 200 -----------------------
 
 
@@ -278,7 +427,7 @@ def test_low_n_bucket_returns_insufficient_and_skips_monte_carlo(conn, route_ind
         stop_id="127N",
         day_type="weekday",
         hour_bucket=8,
-        stat_type="prediction_error",
+        stat_type="delay",  # subway incoming leg reads "delay", not "prediction_error"
         n_observations=50,  # below the n=200 threshold
     )
     _insert_bucket(
