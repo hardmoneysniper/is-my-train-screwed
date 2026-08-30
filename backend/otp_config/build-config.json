@@ -13,32 +13,12 @@
     {
       "type": "gtfs",
       "feedId": "MTABC",
-      "source": "file:///var/opentripplanner/bus_busco.zip"
+      "source": "file:///var/opentripplanner/bus_filtered.zip"
     },
     {
       "type": "gtfs",
       "feedId": "MTA_NYCT_Bus_Manhattan",
-      "source": "file:///var/opentripplanner/bus_manhattan.zip"
-    },
-    {
-      "type": "gtfs",
-      "feedId": "MTA_NYCT_Bus_Bronx",
-      "source": "file:///var/opentripplanner/bus_bronx.zip"
-    },
-    {
-      "type": "gtfs",
-      "feedId": "MTA_NYCT_Bus_Brooklyn",
-      "source": "file:///var/opentripplanner/bus_brooklyn.zip"
-    },
-    {
-      "type": "gtfs",
-      "feedId": "MTA_NYCT_Bus_Queens",
-      "source": "file:///var/opentripplanner/bus_queens.zip"
-    },
-    {
-      "type": "gtfs",
-      "feedId": "MTA_NYCT_Bus_StatenIsland",
-      "source": "file:///var/opentripplanner/bus_staten_island.zip"
+      "source": "file:///var/opentripplanner/bus_manhattan_filtered.zip"
     }
   ]
 }
