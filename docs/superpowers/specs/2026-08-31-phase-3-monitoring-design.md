@@ -42,7 +42,14 @@ Backend, new components:
   │   case; Haiku only when comparing real multiple alternative routes
   │   needs actual judgment. Never invents a route or number — composes
   │   a message from real plan_route/get_risk output, same hard rule as
-  │   every other agent in this product.
+  │   every other agent in this product. Shares Phase 2's citation-format
+  │   convention (trailing `*` on stated percentages + one footer line)
+  │   with the Conversation Agent's system prompt — factor the format
+  │   itself into one shared constant/template both agents reference,
+  │   don't duplicate the literal format text in two prompts and risk
+  │   them drifting apart (a re-plan can produce a real p_miss whenever
+  │   a reroute introduces or changes a transfer, see the edge case
+  │   discussion below the lifecycle table).
   └─ create_monitored_trip / cancel_monitored_trip tools, wired into
       the existing Conversation Agent's tool loop (same pattern as
       plan_route/get_risk/find_stop from Phase 2).
@@ -55,9 +62,16 @@ Backend, new components:
 ```sql
 CREATE TABLE monitored_trips (
   id, anonymous_id, itinerary_snapshot JSON,  -- the real Itinerary from
-                                               -- plan_route, frozen at
-                                               -- creation
-  deadline_ts NULLABLE,       -- only set for deadline-mode trips
+                                               -- plan_route -- set at
+                                               -- creation, REPLACED with
+                                               -- the new itinerary after
+                                               -- every successful re-plan
+                                               -- (never left stale -- see
+                                               -- lifecycle step 3)
+  deadline_ts NULLABLE,       -- only set for deadline-mode trips; the
+                               -- underlying travel-time distribution this
+                               -- was computed against is re-derived from
+                               -- itinerary_snapshot on every re-plan too
   status TEXT,                -- 'active' | 'completed' | 'cancelled' | 'expired'
   created_at, ttl_expires_at, -- = scheduled arrival + 30 min (spec §6)
   last_checked_at NULLABLE,   -- poll-claim staleness marker, see Concurrency
@@ -67,7 +81,11 @@ CREATE TABLE monitored_trips (
 
 1. **Create:** `create_monitored_trip` → stores the snapshot, computes `ttl_expires_at`. If deadline mode (destination/language reads as airport/flight/interview-shaped, or the user says they're short on time), the Conversation Agent extracts the deadline time from conversation — a classification/parsing task, not a computed number, so it stays within the LLM's allowed scope — and a pure-code helper does the actual backward-planning: pulls the relevant route's real travel-time distribution from `reliability_buckets`, takes its p85, and monitors against `deadline_ts - p85_duration`, not just the route's own scheduled time. Reuses Phase 2's data directly.
 2. **Poll (every 60s, Trip Monitor):** claim active trips (Concurrency, below) → check alerts feed for their segments' routes (fetched once per cycle, shared across all trips on the same route) → check headway anomaly against `reliability_buckets` → check TTL. A hit hands off to the Re-plan Agent.
-3. **Re-plan fires:** re-query `plan_route` + `get_risk` for the remaining leg(s), decide template vs. Haiku, write the result into `pending_notification`.
+3. **Re-plan fires:** re-query `plan_route` + `get_risk` for the remaining leg(s). This is agent-agnostic to what the *original* itinerary looked like — `get_risk` finds transfer points fresh from whatever `Itinerary` it's handed, so a trip that started with zero transfers and gets rerouted (e.g. a signal problem forces a transfer that wasn't there before) gets a real, freshly computed `TransferRisk` the same way a newly-planned trip would; a trip that stays transfer-free just gets `[]` again, cheaply. Then:
+   - **Replace `itinerary_snapshot` with the new itinerary** (never left stale) — otherwise the next poll cycle keeps watching the *abandoned* route's segments instead of the one the user is actually on, and a second re-plan would build off outdated state.
+   - **If deadline mode, recompute the `p85`-based threshold from the new itinerary's own `reliability_buckets` distribution**, not the old route's — a rerouted trip (especially one that gained a transfer) has a different travel-time distribution than the one the original `deadline_ts` monitoring threshold was derived from.
+   - Decide template vs. Haiku for the notification text. **If the new plan carries a real `p_miss` (`quality="ok"`), the message must use Phase 2's citation format** (`22%*` + the `*Based on N observed patterns...*` footer) — same hard rule as every other displayed probability in this product (spec §5). The frontend's `splitFooter` already renders this for any message text regardless of which agent produced it, so no frontend change is needed — but the template set and the Haiku system-prompt both need to know this convention, not just the Conversation Agent's own prompt from Task 11. A route-changed-with-no-transfer-risk case uses a simpler template with no citation, since there's no number to cite.
+   - Write the result into `pending_notification`.
 4. **Terminate:** explicit action (`cancel_monitored_trip`, or the agent recognizing "I'm here"/"cancel" in conversation) → `status='completed'`/`'cancelled'`; or TTL passes → `status='expired'`, silent per spec §6 (no notification text — it just stops).
 5. **Surface (on-return notice, same mechanism as any other notification — no separate infrastructure):** every `/chat` call, before answering the user's message, atomically claims any `pending_notification` rows for that `anonymous_id` (see Concurrency) and prepends them.
 
