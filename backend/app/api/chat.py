@@ -16,6 +16,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     conversation_history: list[ChatMessage]
+    anonymous_id: str  # not yet used -- Task 8 wires this into pending-notification surfacing
 
 
 @router.post("/chat")
