@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
+from app.trip_monitor import run_monitor_cycle
 from db import get_connection
 from scripts.aggregate_reliability_buckets import run_aggregate
 
@@ -58,9 +59,35 @@ async def _run_aggregation_loop():
         await asyncio.sleep(AGGREGATION_INTERVAL_S)
 
 
+# Phase 3 Task 7: the trip monitor poll loop (spec §6). Unlike
+# _run_aggregation_sync above, this needs no asyncio.to_thread wrapping --
+# that wrapping exists because run_aggregate is a fully synchronous,
+# potentially long-running batch fold, whereas run_monitor_cycle is
+# natively async (it awaits fetch_subway_alerts/fetch_bus_alerts/
+# replan_trip directly) and its own sqlite calls are made the same
+# un-wrapped way every other async endpoint in this codebase already calls
+# sqlite (create_monitored_trip, cancel_monitored_trip, etc. -- none of
+# Phase 2/3's async code paths wrap sqlite access in to_thread).
+MONITOR_INTERVAL_S = 60  # spec §6
+
+
+async def _run_monitor_loop():
+    while True:
+        try:
+            conn = get_connection()
+            try:
+                await run_monitor_cycle(conn)
+            finally:
+                conn.close()
+        except Exception:
+            logging.exception("trip monitor cycle failed")
+        await asyncio.sleep(MONITOR_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(_run_aggregation_loop())
+    monitor_task = asyncio.create_task(_run_monitor_loop())
     # Mounting a sub-app (below) does not auto-trigger its own lifespan in
     # Starlette -- without driving it explicitly here, the proxy's
     # TripIndex (_trip_index) would stay None and every mounted
@@ -68,8 +95,13 @@ async def lifespan(app: FastAPI):
     async with realtime_proxy_lifespan(realtime_proxy_app):
         yield
     task.cancel()
+    monitor_task.cancel()
     try:
         await task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await monitor_task
     except asyncio.CancelledError:
         pass
 
