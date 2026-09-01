@@ -65,7 +65,7 @@ def _route_signature(itinerary: Itinerary) -> tuple:
 
 
 def _route_summary(itinerary: Itinerary) -> str:
-    return " -> ".join(rs for _, rs in _route_signature(itinerary))
+    return " -> ".join(rs or "?" for _, rs in _route_signature(itinerary))
 
 
 def _format_departure_clock(depart_by_ts: int) -> str:
@@ -90,7 +90,7 @@ def _build_notification(new_itinerary: Itinerary, new_risks: list, depart_by_ts:
         text = f"Your trip has been rerouted: now via {route_summary}. No transfer risk to report for the new route."
     else:
         pct = round(citation_risk.p_miss * 100)
-        footer = CITATION_FOOTER_TEMPLATE.format(n=citation_risk.n, window_days=citation_risk.window_days)
+        footer = CITATION_FOOTER_TEMPLATE.format(n=round(citation_risk.n), window_days=citation_risk.window_days)
         text = (
             f"Your trip has been rerouted: now via {route_summary}. There's about a "
             f"{pct}%* chance of missing the {citation_risk.from_route}->{citation_risk.to_route} "

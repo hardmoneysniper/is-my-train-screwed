@@ -194,7 +194,7 @@ async def test_zero_transfer_reroutes_into_transfer_with_citation(conn, route_in
     # fresh get_risk call is a safe, non-flaky source of the expected footer.
     expected_risks = risk_engine.get_risk(new_itinerary, conn=conn, route_index=route_index)
     ok_risk = next(r for r in expected_risks if r.quality == "ok")
-    expected_footer = CITATION_FOOTER_TEMPLATE.format(n=ok_risk.n, window_days=ok_risk.window_days)
+    expected_footer = CITATION_FOOTER_TEMPLATE.format(n=round(ok_risk.n), window_days=ok_risk.window_days)
     assert expected_footer in result
 
     row = conn.execute("SELECT itinerary_snapshot FROM monitored_trips WHERE id = ?", (trip.id,)).fetchone()
