@@ -1,12 +1,21 @@
 # backend/app/agents/conversation_agent.py
 import json
+from datetime import datetime, timezone
 from anthropic import AsyncAnthropic
 from app.config import settings
 from app.routing.otp_client import OTPClient
 from app.routing.nearest_stop import get_stop_index
-from app.agents.tools import FIND_STOP_TOOL, GET_RISK_TOOL, PLAN_ROUTE_TOOL
+from app.agents.tools import (
+    CANCEL_MONITORED_TRIP_TOOL,
+    CREATE_MONITORED_TRIP_TOOL,
+    FIND_STOP_TOOL,
+    GET_RISK_TOOL,
+    PLAN_ROUTE_TOOL,
+)
+from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
-from app import risk_engine
+from app import deadline, monitoring, risk_engine
+from db import get_connection
 import cost_guard
 
 SYSTEM_PROMPT = (
@@ -37,7 +46,33 @@ SYSTEM_PROMPT = (
     "Q at Roosevelt Island?\" and get_risk returns "
     "{p_miss: 0.12, n: 500, window_days: 14, quality: 'ok'}: you respond "
     "exactly in this shape: \"There's about a 12%* chance of missing that "
-    "transfer.\\n*Based on 500 observed patterns in the last 14 days.*\""
+    "transfer.\\n*Based on 500 observed patterns in the last 14 days.*\"\n\n"
+    "Monitoring a trip: after checking get_risk, if any entry has quality \"ok\"\n"
+    "(any real percentage, however small), or the trip sounds deadline-sensitive\n"
+    "(the user mentions a flight, interview, appointment, or says they're short\n"
+    "on time), ask the user if they'd like you to monitor the trip for\n"
+    "disruptions. Never offer if get_risk returned an empty list AND there's no\n"
+    "deadline signal. Only call create_monitored_trip after the user agrees.\n\n"
+    "If the user gives a specific deadline (e.g. \"I need to be there by 6pm\",\n"
+    "\"my flight boards at 9:15\"), convert it to that day's date (using the\n"
+    "[Current time: ...] marker on the message) and pass it as create_monitored_trip's\n"
+    "deadline_ts, in epoch milliseconds. If the deadline is unclear or you're not\n"
+    "sure what date/time they mean, ask rather than guessing — never invent a\n"
+    "deadline_ts from an ambiguous statement.\n\n"
+    "After create_monitored_trip succeeds, tell the user you're monitoring the\n"
+    "trip. If its result includes a non-null depart_by_ts, also tell them the\n"
+    "latest safe departure time (format the epoch-millisecond timestamp as a\n"
+    "local clock time, the same way you already format itinerary leg times) —\n"
+    "this is real data from the trip's historical delay patterns, not a guess.\n"
+    "If depart_by_ts is null, don't mention a departure time at all — don't\n"
+    "explain why, just omit it.\n\n"
+    "Recognize when the user is done with a monitored trip — phrases like \"I'm\n"
+    "here,\" \"I made it,\" \"cancel this trip,\" \"stop monitoring\" — and call\n"
+    "cancel_monitored_trip. If its result has \"error\": \"ambiguous\", it means the\n"
+    "user has more than one active monitored trip; list the real trips from its\n"
+    "active_trips field and ask which one they mean, then call\n"
+    "cancel_monitored_trip again with the trip_id they pick. Never guess which\n"
+    "trip they mean and never cancel more than one trip for one request."
 )
 
 # system + tools are identical on every turn, so they're cached as one unit.
@@ -52,6 +87,18 @@ _SYSTEM_BLOCKS = [{
 }]
 
 
+def _trip_summary(trip: MonitoredTrip) -> dict:
+    """A small, server-built, real-fields-only summary for the LLM to relay
+    verbatim when asking the user to disambiguate between multiple active
+    monitored trips -- the LLM only quotes this back, it never invents the
+    text itself."""
+    legs = trip.itinerary_snapshot.legs
+    return {
+        "trip_id": trip.id,
+        "summary": f"{legs[0].route_short_name} to {legs[-1].to_stop_name}, started {trip.created_at.isoformat()}",
+    }
+
+
 class ConversationAgent:
     def __init__(self):
         self._client = AsyncAnthropic(api_key=settings.anthropic_api_key)
@@ -62,7 +109,13 @@ class ConversationAgent:
             model=settings.conversation_agent_model,
             max_tokens=512,
             system=_SYSTEM_BLOCKS,
-            tools=[PLAN_ROUTE_TOOL, GET_RISK_TOOL, FIND_STOP_TOOL],
+            tools=[
+                PLAN_ROUTE_TOOL,
+                GET_RISK_TOOL,
+                FIND_STOP_TOOL,
+                CREATE_MONITORED_TRIP_TOOL,
+                CANCEL_MONITORED_TRIP_TOOL,
+            ],
             messages=messages,
         )
         # Raises CostCapExceeded if this call pushed month-to-date spend at
@@ -84,8 +137,63 @@ class ConversationAgent:
         risks = risk_engine.get_risk(itinerary)
         return json.dumps([r.model_dump() for r in risks])
 
-    async def respond(self, user_message: str, conversation_history: list[dict]) -> str:
-        messages = conversation_history + [{"role": "user", "content": user_message}]
+    def _handle_create_monitored_trip(
+        self, tool_input: dict, last_itineraries: list[Itinerary], anonymous_id: str
+    ) -> str:
+        itinerary_index = tool_input.get("itinerary_index", 0)
+        if not (0 <= itinerary_index < len(last_itineraries)):
+            return json.dumps({"error": "no itinerary available yet — call plan_route first"})
+        itinerary = last_itineraries[itinerary_index]
+        deadline_ts = tool_input.get("deadline_ts")
+        trip_id = monitoring.create_monitored_trip(itinerary, anonymous_id, deadline_ts)
+        # depart_by_ts is computed separately from create_monitored_trip, here
+        # in dispatch code, rather than inside that function -- this keeps
+        # create_monitored_trip's own signature exactly `-> int` (per the
+        # plan) while still giving the agent a real, tool-computed number to
+        # narrate (never LLM-invented) if the user wants to know when to
+        # leave. It's null both when there's no deadline and when
+        # compute_deadline_threshold itself returns None for insufficient
+        # data -- SYSTEM_PROMPT tells the agent to treat both cases
+        # identically (omit the departure time, no explanation).
+        depart_by_ts = None
+        if deadline_ts is not None:
+            depart_by_ts = deadline.compute_deadline_threshold(itinerary, deadline_ts)
+        return json.dumps({"trip_id": trip_id, "depart_by_ts": depart_by_ts})
+
+    def _handle_cancel_monitored_trip(self, tool_input: dict, anonymous_id: str) -> str:
+        trip_id = tool_input.get("trip_id")
+        if trip_id is None:
+            # Short-lived, independent connection -- not threaded through
+            # respond()'s signature, matching the design doc's "one short
+            # transaction, not one spanning" principle.
+            conn = get_connection()
+            try:
+                active = monitoring.list_active_trips(conn, anonymous_id)
+            finally:
+                conn.close()
+            if len(active) == 0:
+                return json.dumps({"error": "no active trip to cancel"})
+            if len(active) > 1:
+                return json.dumps({
+                    "error": "ambiguous",
+                    "active_trips": [_trip_summary(t) for t in active],
+                })
+            trip_id = active[0].id
+        cancelled = monitoring.cancel_monitored_trip(trip_id, anonymous_id)
+        return json.dumps({"cancelled": cancelled, "trip_id": trip_id})
+
+    async def respond(self, user_message: str, conversation_history: list[dict], anonymous_id: str) -> str:
+        # Current time is injected into this per-call user message only --
+        # never into the cached SYSTEM_PROMPT/_SYSTEM_BLOCKS, which must stay
+        # byte-identical across calls for Anthropic's prompt caching to work
+        # (see the comment above _SYSTEM_BLOCKS). Interpolating datetime.now()
+        # into the system block would silently break that caching on every
+        # call. The LLM needs today's date/time to parse a stated deadline
+        # ("by 6pm") into a real epoch-ms timestamp.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        messages = conversation_history + [
+            {"role": "user", "content": f"[Current time: {now_iso}]\n{user_message}"}
+        ]
 
         response = await self._create(messages)
         last_itineraries: list[Itinerary] = []
@@ -103,6 +211,10 @@ class ConversationAgent:
                 elif tool_use.name == "find_stop":
                     matches = get_stop_index().find_by_name(tool_use.input["query"])
                     content = json.dumps(matches)
+                elif tool_use.name == "create_monitored_trip":
+                    content = self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
+                elif tool_use.name == "cancel_monitored_trip":
+                    content = self._handle_cancel_monitored_trip(tool_use.input, anonymous_id)
                 else:
                     content = json.dumps({"error": f"unknown tool: {tool_use.name}"})
                 tool_results.append({

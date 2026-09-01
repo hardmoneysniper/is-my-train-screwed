@@ -35,6 +35,7 @@ def test_chat_converts_conversation_history_to_dicts():
             {"role": "user", "content": "plan a trip"},
             {"role": "assistant", "content": "where to?"},
         ],
+        "11111111-1111-1111-1111-111111111111",
     )
 
 
@@ -46,7 +47,7 @@ def test_chat_missing_message_returns_422():
     assert response.status_code == 422
 
 
-def test_chat_with_anonymous_id_is_accepted_and_does_not_change_respond_call():
+def test_chat_passes_anonymous_id_through_to_respond():
     with patch("app.api.chat.ConversationAgent.respond", new_callable=AsyncMock) as mock_respond:
         mock_respond.return_value = "sure"
         response = client.post("/chat", json={
@@ -55,7 +56,9 @@ def test_chat_with_anonymous_id_is_accepted_and_does_not_change_respond_call():
             "anonymous_id": "22222222-2222-2222-2222-222222222222",
         })
     assert response.status_code == 200
-    mock_respond.assert_awaited_once_with("and then?", [])
+    mock_respond.assert_awaited_once_with(
+        "and then?", [], "22222222-2222-2222-2222-222222222222"
+    )
 
 
 def test_chat_missing_anonymous_id_returns_422():

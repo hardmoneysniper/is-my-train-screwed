@@ -40,3 +40,37 @@ GET_RISK_TOOL = {
         "required": [],
     },
 }
+
+CREATE_MONITORED_TRIP_TOOL = {
+    "name": "create_monitored_trip",
+    "description": "Start monitoring the itinerary you just planned for disruptions or deadline risk. Only call this after the user has agreed to be monitored — never proactively without asking first.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "itinerary_index": {
+                "type": "integer",
+                "description": "Which itinerary from the most recent plan_route result to monitor (0 = first/default).",
+            },
+            "deadline_ts": {
+                "type": "integer",
+                "description": "If the user gave a specific deadline (flight, interview, etc.), the epoch-millisecond timestamp for that deadline. Omit entirely if no deadline was given — never guess one.",
+            },
+        },
+        "required": [],
+    },
+}
+
+CANCEL_MONITORED_TRIP_TOOL = {
+    "name": "cancel_monitored_trip",
+    "description": "Stop monitoring a trip — call this when the user says they've arrived, no longer need monitoring, or explicitly asks to cancel. If the user has more than one active monitored trip and it's unclear which they mean, call this tool with no trip_id first — it will tell you the active trips so you can ask the user to pick one, then call again with the specific trip_id.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "trip_id": {
+                "type": "integer",
+                "description": "The specific trip to cancel, if known. Omit if you don't have a specific id yet.",
+            },
+        },
+        "required": [],
+    },
+}
