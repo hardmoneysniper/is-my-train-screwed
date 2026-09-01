@@ -15,7 +15,7 @@ from app.agents.tools import (
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
 from app import deadline, monitoring, risk_engine
-from db import get_connection
+from db import claim_pending_notifications, get_connection
 import cost_guard
 
 # Shared with app/agents/replan_agent.py, which formats this same footer in
@@ -234,6 +234,29 @@ class ConversationAgent:
             response = await self._create(messages)
 
         text_block = next((b for b in response.content if b.type == "text"), None)
-        if text_block is None:
-            return ""
-        return text_block.text
+        reply_text = text_block.text if text_block is not None else ""
+
+        # Claim happens LAST, only once the reply is guaranteed to be
+        # returned -- never at the top of respond(), before the LLM turn(s).
+        # claim_pending_notifications is destructive (it atomically clears
+        # pending_notification the moment it's called): if it ran earlier
+        # and something later in this same call raised (a cost-cap breach,
+        # a tool dispatch error), the notification would be gone from the
+        # database forever, even though the request that was supposed to
+        # show it never actually completed. Claiming here means a failed
+        # request leaves the notification untouched for a later, successful
+        # call to pick up honestly -- see task-8-brief.md.
+        conn = get_connection()
+        try:
+            claimed = claim_pending_notifications(conn, anonymous_id)
+        finally:
+            conn.close()
+
+        # Claimed notification text was already fully composed as plain,
+        # final, user-ready text by Task 6's replan_trip -- it is never fed
+        # back through the LLM for narration. Re-narrating it risks the
+        # model paraphrasing or reformatting a citation number, which this
+        # product's hard rule forbids (see CLAUDE.md). Pure string
+        # concatenation, zero new LLM calls.
+        notification_texts = [row["pending_notification"] for row in claimed]
+        return "\n\n".join(notification_texts + [reply_text])

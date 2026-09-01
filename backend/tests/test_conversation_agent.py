@@ -50,6 +50,26 @@ def isolated_cost_log(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_MONTHLY_SPEND_CAP_USD", "5")
 
 
+@pytest.fixture(autouse=True)
+def no_pending_notifications_by_default(monkeypatch):
+    # Task 8: every respond() call now ends with a claim_pending_notifications
+    # step against the real sqlite database. Default that to a harmless
+    # no-op (a closed-over dummy connection + an empty claim result) so the
+    # many tests in this file that aren't exercising notification behavior
+    # don't accidentally open/write the real on-disk db (settings.db_path)
+    # during an unrelated test. Tests that DO test notification surfacing
+    # override this within their own `with patch(...)` block, which
+    # temporarily shadows this monkeypatch and restores it on exit.
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.get_connection",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.claim_pending_notifications",
+        MagicMock(return_value=[]),
+    )
+
+
 @pytest.mark.asyncio
 async def test_respond_calls_plan_route_tool_and_narrates_result():
     fake_tool_use_response = MagicMock(
@@ -667,3 +687,236 @@ async def test_cancel_monitored_trip_mismatched_ownership_relays_false_not_succe
     tool_result_content = tool_result_message["content"][0]["content"]
     import json
     assert json.loads(tool_result_content) == {"cancelled": False, "trip_id": 99}
+
+
+# --- Task 8: surfacing pending notifications on /chat -----------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_notification_is_prepended_to_unrelated_reply():
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Take the F train — about 30 minutes.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.get_connection") as mock_get_connection, \
+         patch("app.agents.conversation_agent.claim_pending_notifications") as mock_claim, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_claim.return_value = [{"id": 1, "pending_notification": "Your F train is delayed."}]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(return_value=final_response)
+
+        agent = ConversationAgent()
+        reply = await agent.respond(
+            "How do I get from Roosevelt Island to Lex/63?",
+            conversation_history=[], anonymous_id="anon-1",
+        )
+
+    # Notification first, then the LLM's own text -- order matters.
+    assert reply == "Your F train is delayed.\n\nTake the F train — about 30 minutes."
+    mock_claim.assert_called_once_with(mock_get_connection.return_value, "anon-1")
+
+
+@pytest.mark.asyncio
+async def test_no_pending_notifications_reply_is_byte_identical_to_llm_text():
+    # Exact regression check: with claim_pending_notifications returning []
+    # (the common case), the reply must equal *exactly* the LLM's own text,
+    # matching Phase 2's pre-existing behavior with zero difference -- same
+    # assertion shape as test_respond_calls_plan_route_tool_and_narrates_result.
+    fake_tool_use_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    fake_final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Take the F train — about 30 minutes.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.claim_pending_notifications") as mock_claim, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = []
+        mock_claim.return_value = []
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=[fake_tool_use_response, fake_final_response])
+
+        agent = ConversationAgent()
+        reply = await agent.respond("How do I get from Roosevelt Island to Lex/63?", conversation_history=[], anonymous_id="anon-1")
+
+    assert reply == "Take the F train — about 30 minutes."
+
+
+@pytest.mark.asyncio
+async def test_two_pending_notifications_both_appear_in_reply():
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Sure, here's your answer.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.get_connection"), \
+         patch("app.agents.conversation_agent.claim_pending_notifications") as mock_claim, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_claim.return_value = [
+            {"id": 1, "pending_notification": "Your F train is delayed."},
+            {"id": 2, "pending_notification": "Your Q70 bus was rerouted."},
+        ]
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(return_value=final_response)
+
+        agent = ConversationAgent()
+        reply = await agent.respond("anything", conversation_history=[], anonymous_id="anon-1")
+
+    # Both notification texts must appear; relative order between the two
+    # notifications is unconstrained (claim_pending_notifications makes no
+    # ordering guarantee), but the LLM's own text must come last.
+    assert "Your F train is delayed." in reply
+    assert "Your Q70 bus was rerouted." in reply
+    assert reply.endswith("Sure, here's your answer.")
+
+
+@pytest.mark.asyncio
+async def test_claim_pending_notifications_called_exactly_once_after_llm_turns():
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Here you go.")],
+        usage=_fake_usage(),
+    )
+
+    # A shared list records call order across both mocks (the file's usual
+    # AsyncMock(side_effect=[...]) pattern doesn't by itself let us compare
+    # ordering *across two different mocked functions* -- messages.create
+    # and claim_pending_notifications -- so a small recorder is the simplest
+    # way to assert relative ordering here, in the spirit of this file's
+    # existing conventions rather than adding a new mocking dependency).
+    call_order = []
+
+    async def fake_create(**kwargs):
+        call_order.append("messages.create")
+        return plan_route_response if len(call_order) == 1 else final_response
+
+    def fake_claim(conn, anonymous_id):
+        call_order.append("claim")
+        return []
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.get_connection"), \
+         patch("app.agents.conversation_agent.claim_pending_notifications", side_effect=fake_claim) as mock_claim, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.return_value = []
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=fake_create)
+
+        agent = ConversationAgent()
+        await agent.respond("plan a trip", conversation_history=[], anonymous_id="anon-1")
+
+    mock_claim.assert_called_once()
+    # The important behavioral property is single-claim-per-request; this
+    # also confirms the claim's single call happened after both
+    # messages.create calls resolved, not interleaved before them.
+    assert call_order == ["messages.create", "messages.create", "claim"]
+
+
+@pytest.mark.asyncio
+async def test_cost_cap_exceeded_never_claims_a_notification():
+    # Regression test for the "claim only after the LLM turn(s) succeed"
+    # design decision: if a future edit moved the claim back to the top of
+    # respond(), this is the test that would catch it.
+    fake_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="irrelevant")],
+        usage=_fake_usage(input_tokens=10_000_000),  # $10 of input alone, over the $5 cap
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.claim_pending_notifications") as mock_claim, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(return_value=fake_response)
+
+        agent = ConversationAgent()
+        with pytest.raises(cost_guard.CostCapExceeded):
+            await agent.respond("How do I get from Roosevelt Island to Lex/63?", conversation_history=[], anonymous_id="anon-1")
+
+    mock_claim.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sequential_respond_calls_only_surface_seeded_notification_once(tmp_path, monkeypatch):
+    # Real, integration-style test with an actual on-disk sqlite database
+    # (not mocked) -- proves respond() is wired to the real atomic
+    # claim_pending_notifications primitive, not a non-clearing read or some
+    # other broken wiring. Task 1 already fully proved the primitive itself
+    # is atomic under real concurrent racers (test_monitoring_db.py); this
+    # test doesn't re-litigate that, it only proves this task's own wiring
+    # uses it correctly end-to-end via two sequential calls.
+    import db as db_module
+    from app.models.transit import Itinerary, Leg
+
+    db_path = str(tmp_path / "risk.sqlite3")
+    monkeypatch.setattr("app.config.settings.db_path", db_path)
+    # This test needs the REAL get_connection/claim_pending_notifications,
+    # not the no-op mocks the autouse no_pending_notifications_by_default
+    # fixture installs for every other test in this file -- restore the
+    # real functions for this test only.
+    monkeypatch.setattr("app.agents.conversation_agent.get_connection", db_module.get_connection)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.claim_pending_notifications",
+        db_module.claim_pending_notifications,
+    )
+
+    conn = db_module.get_connection(db_path)
+    itinerary = Itinerary(
+        duration_seconds=1800,
+        legs=[Leg(mode="SUBWAY", route_short_name="F", from_stop_name="Roosevelt Island",
+                  to_stop_name="Lex/63", from_stop_id="mtasbwy:R01", to_stop_id="mtasbwy:R02",
+                  start_time_ms=0, end_time_ms=1000)],
+    )
+    conn.execute(
+        """
+        INSERT INTO monitored_trips (
+            anonymous_id, itinerary_snapshot, deadline_ts, status,
+            created_at, ttl_expires_at, last_checked_at, pending_notification
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "anon-real", itinerary.model_dump_json(), None, "active",
+            "2026-08-30T08:00:00+00:00", "2026-08-30T09:00:00+00:00", None,
+            "Your F train is delayed.",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    def text_only_response():
+        return MagicMock(
+            stop_reason="end_turn",
+            content=[MagicMock(type="text", text="Sure, here's your answer.")],
+            usage=_fake_usage(),
+        )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock), \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[text_only_response(), text_only_response()]
+        )
+
+        agent = ConversationAgent()
+        first_reply = await agent.respond("anything", conversation_history=[], anonymous_id="anon-real")
+        second_reply = await agent.respond("anything else", conversation_history=[], anonymous_id="anon-real")
+
+    assert first_reply == "Your F train is delayed.\n\nSure, here's your answer."
+    assert second_reply == "Sure, here's your answer."
