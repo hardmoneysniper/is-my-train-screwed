@@ -18,6 +18,11 @@ from app import deadline, monitoring, risk_engine
 from db import get_connection
 import cost_guard
 
+# Shared with app/agents/replan_agent.py, which formats this same footer in
+# a plain-Python (no-LLM) notification template -- see task-6-brief.md.
+# Extracted here rather than duplicated so the literal only exists once.
+CITATION_FOOTER_TEMPLATE = "*Based on {n} observed patterns in the last {window_days} days.*"
+
 SYSTEM_PROMPT = (
     "You are a NYC transit trip advisor. You never invent routes, durations, "
     "or probabilities — always call plan_route and narrate its exact result. "
@@ -35,7 +40,7 @@ SYSTEM_PROMPT = (
     "only if) your answer cites at least one get_risk entry with "
     "quality 'ok', end your response with exactly one footer line, on its "
     "own line, wrapped in single asterisks: "
-    "'*Based on {n} observed patterns in the last {window_days} days.*' "
+    f"'{CITATION_FOOTER_TEMPLATE}' "
     "— substitute that entry's real n and window_days, never invented "
     "numbers. If you're citing more than one 'ok' entry, use only ONE "
     "footer, for whichever probability is your primary answer — never "

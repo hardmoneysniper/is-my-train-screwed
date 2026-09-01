@@ -59,6 +59,13 @@ class StopIndex:
                         })
         return cls(stops)
 
+    def find_by_id(self, stop_id: str) -> dict | None:
+        """Exact match on the bare (non-feed-prefixed) GTFS stop_id -- same
+        linear-scan style as find_by_name, since self._stops has no separate
+        id index and this is not a hot path (called once per re-plan, not
+        per-request)."""
+        return next((s for s in self._stops if s["stop_id"] == stop_id), None)
+
     def find_by_name(self, query: str, limit: int = 20) -> list[dict]:
         """Case-insensitive substring match of query against stop_name,
         sorted alphabetically by stop_name, capped at limit. No fuzzy
