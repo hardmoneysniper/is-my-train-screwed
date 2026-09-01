@@ -130,6 +130,24 @@ def test_get_connection_is_idempotent(tmp_path):
     conn.close()
 
 
+def test_get_connection_enables_wal_journal_mode(tmp_path):
+    # Phase 3: WAL lets /chat reads and the Trip Monitor's writes proceed
+    # without blocking each other. Assert the pragma actually took effect
+    # -- don't just assume executing it "worked" -- since sqlite's default
+    # (unset) journal_mode is "delete", a different value entirely.
+    conn = get_connection(str(tmp_path / "risk.sqlite3"))
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+    assert mode.lower() == "wal"
+
+
+def test_get_connection_sets_busy_timeout(tmp_path):
+    conn = get_connection(str(tmp_path / "risk.sqlite3"))
+    timeout_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.close()
+    assert timeout_ms == 5000
+
+
 def test_arrival_event_round_trip(tmp_path):
     conn = get_connection(str(tmp_path / "risk.sqlite3"))
     event = _sample_event()
