@@ -359,3 +359,79 @@ async def test_all_walk_itinerary_skips_without_calling_plan_route(conn):
 
     assert result is None
     mock_plan.assert_not_called()
+
+
+# --- Test 7: citation + deadline mode together -- footer must stay LAST --
+#
+# Regression test for the final-whole-branch-review bug: when a reroute
+# produces BOTH a quality="ok" citation AND a depart-by sentence (deadline
+# mode), the footer line must remain the literal last line of the message.
+# The frontend's FOOTER_LINE_RE (frontend/src/App.tsx) only ever inspects
+# the LAST line of the text -- if the depart-by sentence is appended after
+# the footer, the footer silently stops being recognized and renders as
+# literal `*...*` asterisks instead of a styled citation.
+
+
+@pytest.mark.asyncio
+async def test_citation_and_deadline_mode_together_footer_stays_last_line(conn, route_index):
+    old_itinerary = Itinerary(
+        duration_seconds=1200,
+        legs=[_subway_leg("F", "A1", "A3", "Roosevelt Island", "Lex/63",
+                           _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 20))],
+    )
+    deadline_ts_ms = _local_ms(2026, 8, 24, 10, 0)
+    trip = _create_trip(conn, old_itinerary, deadline_ts=deadline_ts_ms)
+
+    new_itinerary = Itinerary(
+        duration_seconds=1200,
+        legs=[
+            _subway_leg("F", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                        _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 8)),
+            _subway_leg("Q", "A2", "A3", "Transfer Stop", "Lex/63",
+                        _local_ms(2026, 8, 24, 8, 10), _local_ms(2026, 8, 24, 8, 20)),
+        ],
+    )
+    # Same worked-example buckets as Test 1 -- sufficient histogram mass on
+    # both incoming and outgoing legs at the new transfer stop, so get_risk
+    # returns quality="ok" and _build_notification includes a citation.
+    _insert_bucket(
+        conn, agency="subway", route_id="F", stop_id="A2", stat_type="delay",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": _WORKED_EXAMPLE_COUNTS}),
+        n_observations=250,
+    )
+    _insert_bucket(
+        conn, agency="subway", route_id="Q", stop_id="A2", stat_type="headway",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [300.0 if i == 4 else 0.0 for i in range(81)]}),
+        n_observations=300,
+    )
+    # compute_deadline_threshold additionally needs a "delay" bucket at
+    # EVERY transit leg's arrival stop (deadline.py's all-or-nothing rule)
+    # -- the new itinerary's second leg (Q) arrives at A3, distinct from
+    # the transfer-risk buckets above (which are keyed at A2).
+    _insert_bucket(
+        conn, agency="subway", route_id="Q", stop_id="A3", stat_type="delay",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": _WORKED_EXAMPLE_COUNTS}),
+        n_observations=250,
+    )
+
+    with patch("app.agents.replan_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan:
+        mock_plan.return_value = [new_itinerary]
+        result = await replan_trip(trip, "alert", conn=conn)
+
+    assert result is not None
+
+    # Both ingredients must actually be present...
+    assert re.search(r"\d+%\*", result)
+    assert "Based on the new route, you should now aim to leave by" in result
+
+    # ...and the footer -- not the depart-by sentence -- must be the
+    # message's literal LAST line, matching the frontend's FOOTER_LINE_RE
+    # (`^\*(.+)\*$`), which only ever inspects `text.splitlines()[-1]`.
+    expected_risks = risk_engine.get_risk(new_itinerary, conn=conn, route_index=route_index)
+    ok_risk = next(r for r in expected_risks if r.quality == "ok")
+    expected_footer = CITATION_FOOTER_TEMPLATE.format(n=round(ok_risk.n), window_days=ok_risk.window_days)
+
+    last_line = result.splitlines()[-1]
+    assert last_line == expected_footer
+    assert re.match(r"^\*(.+)\*$", last_line)
+    assert "Based on the new route" not in last_line

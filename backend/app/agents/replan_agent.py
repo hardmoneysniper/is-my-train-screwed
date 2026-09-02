@@ -88,17 +88,19 @@ def _build_notification(new_itinerary: Itinerary, new_risks: list, depart_by_ts:
 
     if citation_risk is None:
         text = f"Your trip has been rerouted: now via {route_summary}. No transfer risk to report for the new route."
+        if depart_by_ts is not None:
+            text += f" Based on the new route, you should now aim to leave by {_format_departure_clock(depart_by_ts)}."
     else:
         pct = round(citation_risk.p_miss * 100)
         footer = CITATION_FOOTER_TEMPLATE.format(n=round(citation_risk.n), window_days=citation_risk.window_days)
-        text = (
+        body = (
             f"Your trip has been rerouted: now via {route_summary}. There's about a "
             f"{pct}%* chance of missing the {citation_risk.from_route}->{citation_risk.to_route} "
-            f"transfer at {citation_risk.transfer_stop_name}.\n{footer}"
+            f"transfer at {citation_risk.transfer_stop_name}."
         )
-
-    if depart_by_ts is not None:
-        text += f" Based on the new route, you should now aim to leave by {_format_departure_clock(depart_by_ts)}."
+        if depart_by_ts is not None:
+            body += f" Based on the new route, you should now aim to leave by {_format_departure_clock(depart_by_ts)}."
+        text = f"{body}\n{footer}"
 
     return text
 
