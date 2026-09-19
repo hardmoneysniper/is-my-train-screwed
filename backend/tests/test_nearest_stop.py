@@ -86,3 +86,8 @@ def test_from_gtfs_zips_merges_stops_from_all_zips(tmp_path):
 
     names = {s["stop_name"] for s in index.find_by_name("")}
     assert names == {"Roosevelt Island", "Main St / Kissena Blvd", "Fordham Rd"}
+
+
+def test_ferry_zip_is_in_the_loaded_gtfs_list():
+    from app.routing.nearest_stop import _GTFS_ZIP_NAMES
+    assert "ferry.zip" in _GTFS_ZIP_NAMES

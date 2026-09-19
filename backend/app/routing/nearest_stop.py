@@ -95,6 +95,7 @@ _GTFS_ZIP_NAMES = [
     "bus_brooklyn.zip",
     "bus_queens.zip",
     "bus_staten_island.zip",
+    "ferry.zip",
 ]
 
 _stop_index: StopIndex | None = None
