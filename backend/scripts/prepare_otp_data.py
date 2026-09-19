@@ -21,6 +21,7 @@ GTFS_DIR = ROOT / "data" / "gtfs"
 # not just filtered, since they contribute nothing.
 GTFS_FILES = {
     "subway.zip": GTFS_DIR / "subway.zip",
+    "ferry.zip": GTFS_DIR / "ferry.zip",
 }
 FILTERED_BUS_FILES = {
     # output filename: (source zip, [route_ids to keep])

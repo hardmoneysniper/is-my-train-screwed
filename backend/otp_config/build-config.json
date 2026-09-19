@@ -19,6 +19,11 @@
       "type": "gtfs",
       "feedId": "MTA_NYCT_Bus_Manhattan",
       "source": "file:///var/opentripplanner/bus_manhattan_filtered.zip"
+    },
+    {
+      "type": "gtfs",
+      "feedId": "NYCFerry",
+      "source": "file:///var/opentripplanner/ferry.zip"
     }
   ]
 }
