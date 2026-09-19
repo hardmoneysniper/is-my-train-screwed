@@ -124,6 +124,19 @@ def _walk_leg(from_name, to_name, start, end):
     )
 
 
+def _ferry_leg(route_short_name, from_id, to_id, from_name, to_name, start, end):
+    return Leg(
+        mode="FERRY",
+        route_short_name=route_short_name,
+        from_stop_id=f"NYCFerry:{from_id}",
+        from_stop_name=from_name,
+        to_stop_id=f"NYCFerry:{to_id}",
+        to_stop_name=to_name,
+        start_time_ms=start,
+        end_time_ms=end,
+    )
+
+
 # --- single-leg, subway (delay stat_type), matches worked example ---------
 
 
@@ -361,3 +374,48 @@ def test_walk_leg_is_skipped_not_treated_as_missing_bucket(conn, route_index):
     # so it must not cause a spurious None.
     expected = deadline_ts - round(900 * 1000 + _WORKED_EXAMPLE_P85_SECONDS * 1000)
     assert result == expected
+
+
+# --- ferry leg in itinerary makes whole deadline estimate unavailable -------
+
+
+def test_ferry_leg_makes_whole_itinerary_deadline_unavailable(conn, tmp_path):
+    ferry_zip = _routes_zip(tmp_path, "ferry.zip", [("AS", "AS")])
+    subway_zip = _routes_zip(tmp_path, "subway.zip", [("F", "F")])
+    route_index_with_ferry = RouteIndex.from_gtfs([subway_zip, ferry_zip])
+
+    # Sufficient data for the subway leg -- if ferry weren't blocking the
+    # whole estimate, this alone would produce a real number.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": _WORKED_EXAMPLE_COUNTS}),
+        n_observations=250,
+    )
+
+    leg1_end = _local_ms(2026, 8, 24, 8, 10, 0)
+    leg2_start = _local_ms(2026, 8, 24, 8, 15, 0)
+    leg2_end = _local_ms(2026, 8, 24, 8, 30, 0)
+
+    itinerary = Itinerary(
+        duration_seconds=1800,
+        legs=[
+            _subway_leg("F", "B06N", "127N", "Roosevelt Island", "Lexington Av/63 St", _local_ms(2026, 8, 24, 8, 0, 0), leg1_end),
+            _ferry_leg("AS", "4", "17", "Hunters Point South", "East 34th Street", leg2_start, leg2_end),
+        ],
+    )
+
+    deadline_ts = leg2_end + 7200_000
+    result = compute_deadline_threshold(itinerary, deadline_ts, conn=conn, route_index=route_index_with_ferry)
+
+    # No reliability_buckets rows for agency='ferry' exist and never will
+    # in this scope -- the whole itinerary's estimate must come back
+    # unavailable, not a partial number computed from the subway leg
+    # alone. This is the existing all-or-nothing behavior (Task 4,
+    # Phase 2), not new logic -- this test proves it, doesn't change it.
+    assert result is None
