@@ -689,6 +689,12 @@ async def test_cancel_monitored_trip_mismatched_ownership_relays_false_not_succe
     assert json.loads(tool_result_content) == {"cancelled": False, "trip_id": 99}
 
 
+def test_tool_descriptions_mention_ferry():
+    from app.agents.tools import FIND_STOP_TOOL, PLAN_ROUTE_TOOL
+    assert "ferry" in PLAN_ROUTE_TOOL["description"].lower()
+    assert "ferry" in FIND_STOP_TOOL["description"].lower()
+
+
 # --- Task 8: surfacing pending notifications on /chat -----------------------
 
 

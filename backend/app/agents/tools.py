@@ -1,7 +1,7 @@
 # backend/app/agents/tools.py
 PLAN_ROUTE_TOOL = {
     "name": "plan_route",
-    "description": "Get a subway/bus itinerary between two lat/lon points via OpenTripPlanner. Never estimate a route yourself — always call this.",
+    "description": "Get a subway/bus/ferry itinerary between two lat/lon points via OpenTripPlanner. Never estimate a route yourself — always call this.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -16,7 +16,7 @@ PLAN_ROUTE_TOOL = {
 
 FIND_STOP_TOOL = {
     "name": "find_stop",
-    "description": "Look up a subway or bus stop by name or partial name (e.g. 'Roosevelt Island', '86 St') to get its coordinates. Call this when the user names a place instead of giving exact coordinates, then use the returned stop's lat/lon with plan_route. Never guess coordinates yourself.",
+    "description": "Look up a subway, bus, or ferry stop by name or partial name (e.g. 'Roosevelt Island', '86 St') to get its coordinates. Call this when the user names a place instead of giving exact coordinates, then use the returned stop's lat/lon with plan_route. Never guess coordinates yourself.",
     "input_schema": {
         "type": "object",
         "properties": {
