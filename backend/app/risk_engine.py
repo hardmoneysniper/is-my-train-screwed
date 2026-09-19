@@ -63,7 +63,17 @@ MONTE_CARLO_DRAWS = 1000
 # regardless of how long collection has run (task-6-brief.md step 6).
 MAX_WINDOW_DAYS = 20
 
-_MODE_TO_AGENCY = {"SUBWAY": "subway", "BUS": "bus"}
+_MODE_TO_AGENCY = {
+    "SUBWAY": "subway",
+    "BUS": "bus",
+    "FERRY": "ferry",
+    # 2 of NYC Ferry's 9 real GTFS routes (RES "Rockaway East", RWS
+    # "Rockaway West") are route_type=3 (bus) in the source feed, not
+    # route_type=4 (ferry) -- a real shuttle-bus segment bundled into the
+    # ferry feed, not a data error. OTP tags those legs mode="BUS", so
+    # they resolve via the "BUS" entry above, not this one -- correct
+    # given the source data, not a gap to special-case.
+}
 
 _GTFS_DIR = pathlib.Path(__file__).parent.parent / "data" / "gtfs"
 _GTFS_ZIP_NAMES = [
@@ -74,6 +84,7 @@ _GTFS_ZIP_NAMES = [
     "bus_brooklyn.zip",
     "bus_queens.zip",
     "bus_staten_island.zip",
+    "ferry.zip",
 ]
 _default_route_index_cache: RouteIndex | None = None
 

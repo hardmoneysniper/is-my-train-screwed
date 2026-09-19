@@ -660,3 +660,43 @@ def test_strip_feed_prefix_removes_feed_id():
 
 def test_strip_feed_prefix_leaves_bare_id_unchanged():
     assert risk_engine._strip_feed_prefix("127N") == "127N"
+
+
+def test_ferry_transfer_degrades_to_insufficient_not_crash(conn, tmp_path):
+    ferry_zip = _routes_zip(tmp_path, "ferry.zip", [("AS", "AS")])
+    subway_zip = _routes_zip(tmp_path, "subway.zip", [("F", "F")])
+    route_index_with_ferry = RouteIndex.from_gtfs([subway_zip, ferry_zip])
+
+    itinerary = Itinerary(
+        duration_seconds=1800,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="FERRY",
+                route_short_name="AS",
+                from_stop_id="NYCFerry:4",
+                from_stop_name="Hunters Point South",
+                to_stop_id="NYCFerry:17",
+                to_stop_name="East 34th Street",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 30, 0),
+            ),
+        ],
+    )
+    # No reliability_buckets rows for agency='ferry' exist -- none ever
+    # will, in this scope (no ferry collector). This must degrade
+    # honestly, not crash and not fabricate a number.
+    results = get_risk(itinerary, conn=conn, route_index=route_index_with_ferry)
+
+    assert len(results) == 1
+    assert results[0].quality == "insufficient"
+    assert results[0].p_miss is None
