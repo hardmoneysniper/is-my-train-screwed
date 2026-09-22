@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import _run_aggregation_loop, app
+from app.main import _run_aggregation_loop, _run_bus_collector_loop, app
 
 
 def test_proxy_rt_route_reachable_through_mount():
@@ -54,3 +54,29 @@ async def test_aggregation_loop_survives_a_failed_run_and_keeps_going():
     assert call_count["n"] == 1
     mock_log_exception.assert_called_once()
     fake_conn.close.assert_called_once()
+
+
+async def test_bus_collector_loop_restarts_immediately_after_a_failure():
+    call_count = {"n": 0}
+
+    def failing_run_forever():
+        call_count["n"] += 1
+        raise RuntimeError("boom")
+
+    sleep_calls = []
+
+    async def record_sleep_then_stop(seconds):
+        sleep_calls.append(seconds)
+        raise asyncio.CancelledError()
+
+    with patch("app.main.run_forever", side_effect=failing_run_forever), \
+         patch("app.main.asyncio.sleep", side_effect=record_sleep_then_stop), \
+         patch("app.main.logging.exception") as mock_log_exception:
+        with pytest.raises(asyncio.CancelledError):
+            await _run_bus_collector_loop()
+
+    assert call_count["n"] == 1
+    mock_log_exception.assert_called_once()
+    # Restarts immediately on failure, not on the 24h aggregation cadence --
+    # confirm whatever sleep duration is used is small (seconds, not a day).
+    assert sleep_calls == [] or sleep_calls[0] < 3600

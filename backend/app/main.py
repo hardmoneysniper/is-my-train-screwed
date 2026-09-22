@@ -8,6 +8,7 @@ from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
+from collectors.bus_collector import run_forever
 from db import get_connection
 from scripts.aggregate_reliability_buckets import run_aggregate
 
@@ -84,10 +85,42 @@ async def _run_monitor_loop():
         await asyncio.sleep(MONITOR_INTERVAL_S)
 
 
+# Data-ingestion pipeline: the bus collector previously ran as its own
+# standalone Railway service with its own volume -- but derive_bus_
+# arrival_events.py needs its raw output on THIS service's volume, and
+# Railway doesn't support sharing a volume across services (the same
+# constraint that already forced the nightly aggregator in-process,
+# above). Folding the collector in here means its own DATA_DIR (already
+# resolved relative to wherever it runs) lands on this service's volume
+# automatically, with zero change to the collector's own logic.
+BUS_COLLECTOR_RESTART_DELAY_S = 5
+
+
+async def _run_bus_collector_loop():
+    """run_forever() already retries internally on every transient
+    failure (network errors, unexpected exceptions -- see its own
+    backoff loop) and essentially never raises under normal operation.
+    This wrapper exists for the one thing that CAN raise past it: a
+    missing MTA_BUSTIME_API_KEY, checked once before its while True even
+    starts. Restarts immediately (a short fixed delay, not the 24h
+    aggregation cadence) since a crashed poller should come back fast."""
+    while True:
+        try:
+            # Blocking, long-running I/O (its own internal time.sleep
+            # polling loop) -- hand it to a worker thread so it never
+            # stalls /chat or /trip/plan requests being served
+            # concurrently, same reasoning as _run_aggregation_sync.
+            await asyncio.to_thread(run_forever)
+        except Exception:
+            logging.exception("bus collector loop failed")
+        await asyncio.sleep(BUS_COLLECTOR_RESTART_DELAY_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(_run_aggregation_loop())
     monitor_task = asyncio.create_task(_run_monitor_loop())
+    bus_collector_task = asyncio.create_task(_run_bus_collector_loop())
     # Mounting a sub-app (below) does not auto-trigger its own lifespan in
     # Starlette -- without driving it explicitly here, the proxy's
     # TripIndex (_trip_index) would stay None and every mounted
@@ -96,12 +129,17 @@ async def lifespan(app: FastAPI):
         yield
     task.cancel()
     monitor_task.cancel()
+    bus_collector_task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
     try:
         await monitor_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await bus_collector_task
     except asyncio.CancelledError:
         pass
 
