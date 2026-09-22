@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import _run_aggregation_loop, _run_bus_collector_loop, app
+from app.main import _run_aggregation_loop, _run_aggregation_sync, _run_bus_collector_loop, app
 
 
 def test_proxy_rt_route_reachable_through_mount():
@@ -80,3 +80,36 @@ async def test_bus_collector_loop_restarts_immediately_after_a_failure():
     # Restarts immediately on failure, not on the 24h aggregation cadence --
     # confirm whatever sleep duration is used is small (seconds, not a day).
     assert sleep_calls == [] or sleep_calls[0] < 3600
+
+
+async def test_nightly_ingestion_steps_are_independently_isolated():
+    fake_conn = MagicMock()
+    calls = []
+
+    def failing_backfill(*a, **k):
+        calls.append("backfill")
+        raise RuntimeError("subway backfill boom")
+
+    def ok_ingest(*a, **k):
+        calls.append("ingest")
+
+    def failing_derive(*a, **k):
+        calls.append("derive")
+        raise RuntimeError("bus derive boom")
+
+    def ok_aggregate(conn):
+        calls.append("aggregate")
+
+    with patch("app.main.get_connection", return_value=fake_conn), \
+         patch("app.main.download_subwaydata_run_backfill", side_effect=failing_backfill), \
+         patch("app.main.ingest_subwaydata_run_ingest", side_effect=ok_ingest), \
+         patch("app.main.derive_bus_arrival_events_run_derive", side_effect=failing_derive), \
+         patch("app.main.run_aggregate", side_effect=ok_aggregate), \
+         patch("app.main.logging.exception") as mock_log_exception:
+        _run_aggregation_sync()
+
+    # All four steps were attempted despite two of them failing -- neither
+    # failure blocked its siblings or the final aggregate call.
+    assert calls == ["backfill", "ingest", "derive", "aggregate"]
+    assert mock_log_exception.call_count == 2
+    fake_conn.close.assert_called_once()

@@ -1,16 +1,27 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
-from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
+from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan, SUBWAY_ZIP, TripIndex
 from app.trip_monitor import run_monitor_cycle
 from collectors.bus_collector import run_forever
 from db import get_connection
 from scripts.aggregate_reliability_buckets import run_aggregate
+from scripts.download_subwaydata import run_backfill as download_subwaydata_run_backfill
+from scripts.ingest_subwaydata import (
+    RAW_DIR as SUBWAY_RAW_DIR,
+    run_ingest as ingest_subwaydata_run_ingest,
+    build_static_stop_times_index,
+)
+from scripts.derive_bus_arrival_events import (
+    RAW_DIR as BUS_RAW_DIR,
+    run_derive as derive_bus_arrival_events_run_derive,
+)
 
 # Final whole-branch review, Minor #3: without an explicit basicConfig,
 # logging.exception below relies on Python's last-resort handler, which is
@@ -26,6 +37,27 @@ logging.basicConfig(level=logging.INFO)
 # in-process instead, on the same schedule, sharing this process's file.
 AGGREGATION_INTERVAL_S = 24 * 60 * 60
 
+# Task 2 (data-ingestion pipeline): subway's TripIndex and 565K-row static
+# stop-times index are real, non-trivial parsing work -- built once, lazily,
+# cached at module level (matches risk_engine.py's _default_route_index()
+# convention) rather than rebuilt every nightly cycle.
+_subway_trip_index_cache: TripIndex | None = None
+_subway_static_index_cache: dict | None = None
+
+
+def _subway_trip_index() -> TripIndex:
+    global _subway_trip_index_cache
+    if _subway_trip_index_cache is None:
+        _subway_trip_index_cache = TripIndex(SUBWAY_ZIP)
+    return _subway_trip_index_cache
+
+
+def _subway_static_index() -> dict:
+    global _subway_static_index_cache
+    if _subway_static_index_cache is None:
+        _subway_static_index_cache = build_static_stop_times_index(SUBWAY_ZIP)
+    return _subway_static_index_cache
+
 
 def _run_aggregation_sync():
     # sqlite3 connections are single-thread-affine (check_same_thread
@@ -34,6 +66,22 @@ def _run_aggregation_sync():
     # opened on the event-loop thread and passed in.
     conn = get_connection()
     try:
+        # Each of these 3 steps is wrapped in its own try/except -- a
+        # failure in one (e.g. a subway backfill network blip) must never
+        # block its siblings or the existing run_aggregate() fold below
+        # from still running in the same cycle.
+        try:
+            download_subwaydata_run_backfill(SUBWAY_RAW_DIR, datetime.now(timezone.utc).date())
+        except Exception:
+            logging.exception("subway backfill download failed")
+        try:
+            ingest_subwaydata_run_ingest(SUBWAY_RAW_DIR, conn, _subway_trip_index(), _subway_static_index())
+        except Exception:
+            logging.exception("subway ingest failed")
+        try:
+            derive_bus_arrival_events_run_derive(BUS_RAW_DIR, conn)
+        except Exception:
+            logging.exception("bus derive failed")
         run_aggregate(conn)
     finally:
         conn.close()
@@ -41,13 +89,15 @@ def _run_aggregation_sync():
 
 async def _run_aggregation_loop():
     """Nightly fold of arrival_events into reliability_buckets (Task 5),
-    run in-process (see module docstring). Runs immediately on startup --
-    not after waiting a full 24h -- so a fresh deploy doesn't leave
-    reliability_buckets empty for a day; Task 5's design already folds a
-    large initial backlog in one run. A failed run is caught and logged,
-    never crashes the process -- the loop keeps going and retries on the
-    next 24h cycle (same never-let-one-cycle-kill-the-loop philosophy as
-    backup_from_railway.py's daemon loop).
+    run in-process (see module docstring). Also runs the subway
+    backfill/ingest (subwaydata.nyc) and bus derive (Task 2) steps first,
+    before the reliability_buckets fold, in the same cycle. Runs
+    immediately on startup -- not after waiting a full 24h -- so a fresh
+    deploy doesn't leave reliability_buckets empty for a day; Task 5's
+    design already folds a large initial backlog in one run. A failed run
+    is caught and logged, never crashes the process -- the loop keeps
+    going and retries on the next 24h cycle (same never-let-one-cycle-
+    kill-the-loop philosophy as backup_from_railway.py's daemon loop).
     """
     while True:
         try:
