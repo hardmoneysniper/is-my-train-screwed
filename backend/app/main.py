@@ -3,12 +3,14 @@ import gzip
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
+from app.day_type import day_type_for
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
 from collectors.bus_collector import CORRIDORS, DATA_DIR as BUS_RAW_DIR, run_forever
@@ -103,26 +105,44 @@ async def _run_bus_collector_loop():
 #
 # Per-route targets below are grounded in real observed data (2026-09-22,
 # ~17.3h of fresh collection post-redeploy): distinct stop_id counts were
-# M60+=35, Q70+=7, Q102=30. Target = distinct_stops * 24 hours * 2
-# day_types * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't
-# evenly spread across hours, so the slowest/sparsest bucket takes
-# noticeably longer than this average-case number to reach n=200; also a
-# margin against undercounting stops from only ~17h of data, since rarely
+# M60+=35, Q70+=7, Q102=30. Per-day-type target = distinct_stops * 24
+# hours * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't evenly
+# spread across hours, so the slowest/sparsest bucket takes noticeably
+# longer than this average-case number to reach n=200; also a margin
+# against undercounting stops from only ~17h of data, since rarely
 # -visited stops may not have appeared yet). Recompute if CORRIDORS ever
 # changes or a route's real stop count turns out very different from
 # this session's measurement.
+#
+# Fixed 2026-09-22 (real bug, caught before it could bite): an earlier
+# version of this check tracked one combined total per route, not split
+# by day_type. Since weekday data accumulates ~5x faster than weekend
+# (5 weekdays vs. 2 weekend days per week), a combined total could be
+# satisfied almost entirely by weekday records while weekend buckets
+# stayed empty -- and the collector would auto-stop with zero usable
+# weekend reliability data. Tracking weekday and weekend independently
+# closes that gap: both must independently cross their target.
 BUS_COLLECTION_TARGETS = {
-    "M60+": 500_000,
-    "Q70+": 100_000,
-    "Q102": 450_000,
+    "M60+": {"weekday": 250_000, "weekend": 250_000},
+    "Q70+": {"weekday": 50_000, "weekend": 50_000},
+    "Q102": {"weekday": 225_000, "weekend": 225_000},
 }
 BUS_COLLECTION_DONE_MARKER = Path(__file__).parent.parent / "data" / ".bus_collection_complete"
 BUS_VOLUME_CHECK_INTERVAL_S = 24 * 60 * 60
 
 
-def _bus_route_record_counts() -> dict[str, int]:
-    counts = {route: 0 for route in CORRIDORS}
+def _bus_route_day_type_counts() -> dict[str, dict[str, int]]:
+    """Per-route record counts, split by day_type (weekday/weekend, see
+    app/day_type.py) -- the file's own date determines its day_type, so
+    this reads the date once per file, not once per line."""
+    counts = {route: {"weekday": 0, "weekend": 0} for route in CORRIDORS}
     for path in sorted(Path(BUS_RAW_DIR).glob("*.ndjson*")):
+        service_date_str = path.name.split(".")[0]
+        try:
+            service_date = date.fromisoformat(service_date_str)
+        except ValueError:
+            continue
+        day_type = day_type_for(service_date)
         opener = gzip.open if path.suffix == ".gz" else open
         try:
             with opener(path, "rt") as f:
@@ -132,7 +152,7 @@ def _bus_route_record_counts() -> dict[str, int]:
                     except json.JSONDecodeError:
                         continue
                     if route in counts:
-                        counts[route] += 1
+                        counts[route][day_type] += 1
         except OSError:
             continue
     return counts
@@ -140,11 +160,11 @@ def _bus_route_record_counts() -> dict[str, int]:
 
 async def _run_bus_volume_check_loop(bus_collector_task: "asyncio.Task") -> None:
     """Once every corridor in CORRIDORS crosses its BUS_COLLECTION_TARGETS
-    entry, cancels bus_collector_task (no more MTA API polling, no more
-    raw writes) and leaves a durable marker file so a later
-    redeploy/restart doesn't silently resume collecting. Checked once a
-    day, not on the collector's own 30s/5s cadences -- this is a cheap
-    proxy check, not something that needs tight latency.
+    entry for BOTH weekday and weekend, cancels bus_collector_task (no
+    more MTA API polling, no more raw writes) and leaves a durable marker
+    file so a later redeploy/restart doesn't silently resume collecting.
+    Checked once a day, not on the collector's own 30s/5s cadences --
+    this is a cheap proxy check, not something that needs tight latency.
     """
     if BUS_COLLECTION_DONE_MARKER.exists():
         bus_collector_task.cancel()
@@ -152,11 +172,16 @@ async def _run_bus_volume_check_loop(bus_collector_task: "asyncio.Task") -> None
     while True:
         await asyncio.sleep(BUS_VOLUME_CHECK_INTERVAL_S)
         try:
-            counts = await asyncio.to_thread(_bus_route_record_counts)
+            counts = await asyncio.to_thread(_bus_route_day_type_counts)
         except Exception:
             logging.exception("bus volume check failed")
             continue
-        if all(counts.get(route, 0) >= target for route, target in BUS_COLLECTION_TARGETS.items()):
+        target_reached = all(
+            counts.get(route, {}).get(day_type, 0) >= target
+            for route, targets_by_day_type in BUS_COLLECTION_TARGETS.items()
+            for day_type, target in targets_by_day_type.items()
+        )
+        if target_reached:
             BUS_COLLECTION_DONE_MARKER.parent.mkdir(parents=True, exist_ok=True)
             BUS_COLLECTION_DONE_MARKER.write_text(json.dumps(counts))
             logging.info("bus collection target reached, stopping collector: %s", counts)
