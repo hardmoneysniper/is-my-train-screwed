@@ -35,30 +35,28 @@ logging.basicConfig(level=logging.INFO)
 # originally described it (a cron service and this SQLite-backed backend
 # would each get their own, disconnected copy of risk.sqlite3). It runs
 # in-process instead, on the same schedule, sharing this process's file.
-AGGREGATION_INTERVAL_S = 24 * 60 * 60
+#
+# Cost incident 2026-09-22: a real payment method is on file for this
+# Railway account (contradicting the earlier-documented "no card, can't be
+# charged" state -- that assumption is stale, see CLAUDE.md) and Railway
+# bills GB-RAM-hours. Running hourly instead of daily means each cycle's
+# idempotent download_subwaydata_run_backfill/ingest_subwaydata_run_ingest/
+# derive_bus_arrival_events_run_derive calls process a much smaller
+# incremental slice (new files since the last run) rather than one huge
+# daily/startup batch -- lower peak memory and disk per cycle, spread out
+# instead of spiked.
+AGGREGATION_INTERVAL_S = 60 * 60
 
-# Task 2 (data-ingestion pipeline): subway's TripIndex and 565K-row static
-# stop-times index are real, non-trivial parsing work -- built once, lazily,
-# cached at module level (matches risk_engine.py's _default_route_index()
-# convention) rather than rebuilt every nightly cycle.
-_subway_trip_index_cache: TripIndex | None = None
-_subway_static_index_cache: dict | None = None
-
-
-def _subway_trip_index() -> TripIndex:
-    global _subway_trip_index_cache
-    if _subway_trip_index_cache is None:
-        _subway_trip_index_cache = TripIndex(SUBWAY_ZIP)
-    return _subway_trip_index_cache
-
-
-def _subway_static_index() -> dict:
-    global _subway_static_index_cache
-    if _subway_static_index_cache is None:
-        _subway_static_index_cache = build_static_stop_times_index(SUBWAY_ZIP)
-    return _subway_static_index_cache
-
-
+# Cost incident 2026-09-22 (continued): subway's TripIndex and 565K-row
+# static stop-times index were previously cached permanently at module
+# level, matching risk_engine.py's _default_route_index() convention --
+# but that convention is for data queried on every live request, where the
+# permanent RAM cost buys real latency savings. Ingestion runs briefly
+# once an hour; the rest of the time, that cache bought nothing but a
+# permanent increase in this always-on service's billed RAM footprint.
+# Rebuilding fresh each cycle trades a bounded, short-lived CPU/memory
+# spike (freed by GC immediately after the cycle) for eliminating that
+# permanent tax.
 def _run_aggregation_sync():
     # sqlite3 connections are single-thread-affine (check_same_thread
     # defaults to True) -- the connection must be opened AND used in the
@@ -75,7 +73,9 @@ def _run_aggregation_sync():
         except Exception:
             logging.exception("subway backfill download failed")
         try:
-            ingest_subwaydata_run_ingest(SUBWAY_RAW_DIR, conn, _subway_trip_index(), _subway_static_index())
+            subway_trip_index = TripIndex(SUBWAY_ZIP)
+            subway_static_index = build_static_stop_times_index(SUBWAY_ZIP)
+            ingest_subwaydata_run_ingest(SUBWAY_RAW_DIR, conn, subway_trip_index, subway_static_index)
         except Exception:
             logging.exception("subway ingest failed")
         try:
@@ -88,16 +88,18 @@ def _run_aggregation_sync():
 
 
 async def _run_aggregation_loop():
-    """Nightly fold of arrival_events into reliability_buckets (Task 5),
+    """Hourly fold of arrival_events into reliability_buckets (Task 5),
     run in-process (see module docstring). Also runs the subway
     backfill/ingest (subwaydata.nyc) and bus derive (Task 2) steps first,
-    before the reliability_buckets fold, in the same cycle. Runs
-    immediately on startup -- not after waiting a full 24h -- so a fresh
-    deploy doesn't leave reliability_buckets empty for a day; Task 5's
-    design already folds a large initial backlog in one run. A failed run
-    is caught and logged, never crashes the process -- the loop keeps
-    going and retries on the next 24h cycle (same never-let-one-cycle-
-    kill-the-loop philosophy as backup_from_railway.py's daemon loop).
+    before the reliability_buckets fold, in the same cycle -- each call is
+    idempotent (already-processed days/files are skipped), so hourly runs
+    just mean smaller incremental slices instead of one big daily batch
+    (see AGGREGATION_INTERVAL_S's cost-incident comment above). Runs
+    immediately on startup -- not after waiting a full hour -- so a fresh
+    deploy doesn't leave reliability_buckets empty. A failed run is caught
+    and logged, never crashes the process -- the loop keeps going and
+    retries on the next hourly cycle (same never-let-one-cycle-kill-the-
+    loop philosophy as backup_from_railway.py's daemon loop).
     """
     while True:
         try:
