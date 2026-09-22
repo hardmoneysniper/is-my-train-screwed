@@ -1,6 +1,9 @@
 import asyncio
+import gzip
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
@@ -8,7 +11,7 @@ from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
-from collectors.bus_collector import run_forever
+from collectors.bus_collector import CORRIDORS, DATA_DIR as BUS_RAW_DIR, run_forever
 from db import get_connection
 
 # Final whole-branch review, Minor #3: without an explicit basicConfig,
@@ -86,10 +89,86 @@ async def _run_bus_collector_loop():
         await asyncio.sleep(BUS_COLLECTOR_RESTART_DELAY_S)
 
 
+# Cost incident 2026-09-22 (continued): once each corridor of interest has
+# "enough" data, collection should stop rather than keep polling MTA and
+# billing Railway forever. CLAUDE.md's actual data-gating rule is n>=200
+# per (route, stop, day_type) bucket, where day_type is just
+# weekday/weekend (app/day_type.py) -- direction is not a separate axis
+# in practice, since each physical stop_id already only ever appears with
+# one direction. Computing real bucket occupancy precisely requires the
+# full derive+aggregate step, which now runs locally
+# (run_local_pipeline.py), not on this always-on service. Total raw
+# records per route is a cheap proxy: computable directly from files
+# already on disk, no parsing/bucketing needed.
+#
+# Per-route targets below are grounded in real observed data (2026-09-22,
+# ~17.3h of fresh collection post-redeploy): distinct stop_id counts were
+# M60+=35, Q70+=7, Q102=30. Target = distinct_stops * 24 hours * 2
+# day_types * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't
+# evenly spread across hours, so the slowest/sparsest bucket takes
+# noticeably longer than this average-case number to reach n=200; also a
+# margin against undercounting stops from only ~17h of data, since rarely
+# -visited stops may not have appeared yet). Recompute if CORRIDORS ever
+# changes or a route's real stop count turns out very different from
+# this session's measurement.
+BUS_COLLECTION_TARGETS = {
+    "M60+": 500_000,
+    "Q70+": 100_000,
+    "Q102": 450_000,
+}
+BUS_COLLECTION_DONE_MARKER = Path(__file__).parent.parent / "data" / ".bus_collection_complete"
+BUS_VOLUME_CHECK_INTERVAL_S = 24 * 60 * 60
+
+
+def _bus_route_record_counts() -> dict[str, int]:
+    counts = {route: 0 for route in CORRIDORS}
+    for path in sorted(Path(BUS_RAW_DIR).glob("*.ndjson*")):
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            with opener(path, "rt") as f:
+                for line in f:
+                    try:
+                        route = json.loads(line).get("route_id")
+                    except json.JSONDecodeError:
+                        continue
+                    if route in counts:
+                        counts[route] += 1
+        except OSError:
+            continue
+    return counts
+
+
+async def _run_bus_volume_check_loop(bus_collector_task: "asyncio.Task") -> None:
+    """Once every corridor in CORRIDORS crosses its BUS_COLLECTION_TARGETS
+    entry, cancels bus_collector_task (no more MTA API polling, no more
+    raw writes) and leaves a durable marker file so a later
+    redeploy/restart doesn't silently resume collecting. Checked once a
+    day, not on the collector's own 30s/5s cadences -- this is a cheap
+    proxy check, not something that needs tight latency.
+    """
+    if BUS_COLLECTION_DONE_MARKER.exists():
+        bus_collector_task.cancel()
+        return
+    while True:
+        await asyncio.sleep(BUS_VOLUME_CHECK_INTERVAL_S)
+        try:
+            counts = await asyncio.to_thread(_bus_route_record_counts)
+        except Exception:
+            logging.exception("bus volume check failed")
+            continue
+        if all(counts.get(route, 0) >= target for route, target in BUS_COLLECTION_TARGETS.items()):
+            BUS_COLLECTION_DONE_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            BUS_COLLECTION_DONE_MARKER.write_text(json.dumps(counts))
+            logging.info("bus collection target reached, stopping collector: %s", counts)
+            bus_collector_task.cancel()
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     monitor_task = asyncio.create_task(_run_monitor_loop())
     bus_collector_task = asyncio.create_task(_run_bus_collector_loop())
+    bus_volume_check_task = asyncio.create_task(_run_bus_volume_check_loop(bus_collector_task))
     # Mounting a sub-app (below) does not auto-trigger its own lifespan in
     # Starlette -- without driving it explicitly here, the proxy's
     # TripIndex (_trip_index) would stay None and every mounted
@@ -98,12 +177,17 @@ async def lifespan(app: FastAPI):
         yield
     monitor_task.cancel()
     bus_collector_task.cancel()
+    bus_volume_check_task.cancel()
     try:
         await monitor_task
     except asyncio.CancelledError:
         pass
     try:
         await bus_collector_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await bus_volume_check_task
     except asyncio.CancelledError:
         pass
 
