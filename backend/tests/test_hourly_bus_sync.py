@@ -1,12 +1,12 @@
 """Tests for scripts/hourly_bus_sync.py's real logic: pull-then-delete
-safety ordering, append-vs-overwrite by file type, and lock staleness.
-railway ssh itself is mocked -- not re-testing the CLI, testing that this
-script uses it correctly and never deletes before a local write is
-confirmed."""
-from datetime import datetime, timedelta, timezone
+safety ordering and append-vs-overwrite by file type. railway ssh itself
+is mocked -- not re-testing the CLI, testing that this script uses it
+correctly and never deletes before a local write is confirmed. Recurrence
+and overlap protection are handled by Windows Task Scheduler (this
+script is one-shot, see its module docstring), not tested here."""
 from unittest.mock import patch
 
-from scripts.hourly_bus_sync import _refresh_lock, sync_once
+from scripts.hourly_bus_sync import sync_once
 
 
 def test_sync_once_appends_ndjson_but_overwrites_gz(tmp_path):
@@ -44,25 +44,3 @@ def test_sync_once_skips_empty_remote_files_without_deleting(tmp_path):
     assert pulled == {}
     assert deleted == []
     assert not (local_dir / "2026-09-22.ndjson").exists()
-
-
-def test_refresh_lock_claims_when_no_existing_lock(tmp_path):
-    lock_path = tmp_path / ".lock"
-    with patch("scripts.hourly_bus_sync.LOCK_PATH", lock_path):
-        assert _refresh_lock() is True
-    assert lock_path.exists()
-
-
-def test_refresh_lock_rejects_when_recently_held(tmp_path):
-    lock_path = tmp_path / ".lock"
-    lock_path.write_text(datetime.now(timezone.utc).isoformat())
-    with patch("scripts.hourly_bus_sync.LOCK_PATH", lock_path):
-        assert _refresh_lock() is False
-
-
-def test_refresh_lock_self_heals_when_lock_is_stale(tmp_path):
-    lock_path = tmp_path / ".lock"
-    stale_time = datetime.now(timezone.utc) - timedelta(hours=3)
-    lock_path.write_text(stale_time.isoformat())
-    with patch("scripts.hourly_bus_sync.LOCK_PATH", lock_path):
-        assert _refresh_lock() is True

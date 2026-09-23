@@ -18,25 +18,22 @@ across sync cycles, reconstructing the full day incrementally. Already-
 rotated .gz files are one-shot (created once, at day rollover) and are
 written fresh locally.
 
-Runs as a long-lived daemon (see run_daemon() below), launched once at
-logon via backend/run_hourly_bus_sync.bat from the Windows Startup
-folder (Task Scheduler is blocked on this account -- see CLAUDE.md),
-same pattern as backup_from_railway.py.
+Runs as a one-shot script: does one sync cycle, then exits. Recurrence
+and overlap protection are both handled natively by Windows Task
+Scheduler (see CLAUDE.md -- "at logon" triggers are blocked on this
+account, likely an anti-persistence policy, but genuine recurring
+triggers like `/sc hourly` work fine and are a better fit than a
+self-looping daemon anyway: Task Scheduler's own "don't start a new
+instance if already running" setting replaces the need for this
+script to manage its own lock file).
 """
 import os
 import shutil
 import subprocess
 import sys
-import time
-import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 
 LOCAL_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
-LOCK_PATH = Path(__file__).parent.parent / "data" / ".hourly_bus_sync_daemon.lock"
-
-SYNC_INTERVAL_SECONDS = 60 * 60
-LOCK_STALE_AFTER_SECONDS = 60 * 60 * 2
 
 PROJECT_ID = "77096939-d30b-46a4-b439-c545aff3fe25"
 SERVICE_ID = "f66ebb7b-778d-4041-bde9-d66ce5c17223"  # backend
@@ -57,7 +54,15 @@ def _railway_ssh(*remote_args: str, timeout: int = 120) -> subprocess.CompletedP
         "-p", PROJECT_ID, "-s", SERVICE_ID, "-e", ENVIRONMENT_ID,
         "--", *remote_args,
     ]
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ, timeout=timeout)
+    # Windows Task Scheduler-launched processes can deliver a spurious
+    # Ctrl+C to child processes when the parent console/session tears
+    # down -- isolating this subprocess into its own process group stops
+    # that signal from propagating to it.
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    return subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ,
+        timeout=timeout, creationflags=creationflags,
+    )
 
 
 def _list_remote_files() -> list[str]:
@@ -108,44 +113,13 @@ def sync_once() -> dict[str, int]:
     return pulled
 
 
-def _refresh_lock() -> bool:
-    """Claim (or renew) the daemon lock. Returns False only if another
-    instance renewed the lock within the last 2 hours -- i.e. a real
-    second instance is active, not a leftover from a crashed/killed
-    process (which self-heals once the lock goes stale), matching
-    backup_from_railway.py's established pattern."""
-    now = datetime.now(timezone.utc)
-    if LOCK_PATH.exists():
-        try:
-            lock_time = datetime.fromisoformat(LOCK_PATH.read_text().strip())
-            if (now - lock_time).total_seconds() < LOCK_STALE_AFTER_SECONDS:
-                return False
-        except ValueError:
-            pass
-    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    LOCK_PATH.write_text(now.isoformat())
-    return True
-
-
-def run_daemon() -> None:
-    if not _refresh_lock():
-        print("[hourly-bus-sync] another instance already holds the lock, exiting", flush=True)
-        return
-
-    print(f"[hourly-bus-sync] started -- syncing every {SYNC_INTERVAL_SECONDS // 60}min", flush=True)
-    while True:
-        _refresh_lock()
-        try:
-            pulled = sync_once()
-            if pulled:
-                print(f"[hourly-bus-sync] {datetime.now(timezone.utc).isoformat()} pulled {pulled}", flush=True)
-            else:
-                print(f"[hourly-bus-sync] {datetime.now(timezone.utc).isoformat()} nothing new", flush=True)
-        except Exception:
-            print("[hourly-bus-sync] sync cycle failed:", file=sys.stderr, flush=True)
-            traceback.print_exc()
-        time.sleep(SYNC_INTERVAL_SECONDS)
-
-
 if __name__ == "__main__":
-    run_daemon()
+    try:
+        pulled = sync_once()
+    except Exception as e:
+        print(f"[hourly-bus-sync] sync cycle failed: {e!r}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if pulled:
+        print(f"[hourly-bus-sync] pulled {pulled}", flush=True)
+    else:
+        print("[hourly-bus-sync] nothing new", flush=True)
