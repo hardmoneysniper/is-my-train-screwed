@@ -30,16 +30,19 @@ from pathlib import Path
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15"]  # spec §2 seed set + Q102 (user,
-# 2026-08-29) + Q3/B15 (user, 2026-09-28) -- the spec's own named JFK-expansion
-# candidates ("any JFK bus corridor (e.g. Q3, B15) added only through the
-# coverage-expansion pipeline on demand"). Roosevelt Island Tram is static-
-# schedule, not collected here. Q102's real route_id confirmed live as "Q102"
-# -- no SBS "+" suffix, unlike Q70+/M60+ (checked directly, not assumed from
-# that pattern; not every route carries one). Q3/B15 route_ids confirmed
-# directly against bus_queens.zip/bus_brooklyn.zip's routes.txt (route_short_name
-# "Q3"/"B15", both route_type=3, both real JFK-bound routes) -- also plain, no
-# "+" suffix. No collection targets set yet for these two (see
+CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec
+# §2 seed set + Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's
+# own named JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
+# second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
+# picked over Q06/Q07 which serve JFK's cargo area rather than passenger
+# terminals). Roosevelt Island Tram is static-schedule, not collected here.
+# Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
+# Q70+/M60+ (checked directly, not assumed from that pattern; not every route
+# carries one). Q3/B15/Q10/Q72/Q80/Q90 route_ids all confirmed directly
+# against the real bus.zip/bus_queens.zip/bus_brooklyn.zip routes.txt (route_
+# short_name matches route_id exactly for all six, all route_type=3, all
+# real JFK- or LGA-bound routes) -- also all plain, no "+" suffix. No
+# collection targets set yet for any of these six (see
 # scripts/hourly_bus_sync.py's BUS_COLLECTION_TARGETS) -- real per-route stop
 # counts need some initial data first, same rigor as the original 3.
 # Note: the M subway line (as in an M-train -> Q70 transfer) is NOT added here --
