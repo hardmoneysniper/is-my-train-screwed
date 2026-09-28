@@ -1,19 +1,15 @@
 import asyncio
-import gzip
-import json
 import logging
 from contextlib import asynccontextmanager
-from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
-from app.day_type import day_type_for
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
-from collectors.bus_collector import CORRIDORS, DATA_DIR as BUS_RAW_DIR, run_forever
+from collectors.bus_collector import run_forever
 from db import get_connection
 
 # Final whole-branch review, Minor #3: without an explicit basicConfig,
@@ -91,102 +87,41 @@ async def _run_bus_collector_loop():
         await asyncio.sleep(BUS_COLLECTOR_RESTART_DELAY_S)
 
 
-# Cost incident 2026-09-22 (continued): once each corridor of interest has
-# "enough" data, collection should stop rather than keep polling MTA and
-# billing Railway forever. CLAUDE.md's actual data-gating rule is n>=200
-# per (route, stop, day_type) bucket, where day_type is just
-# weekday/weekend (app/day_type.py) -- direction is not a separate axis
-# in practice, since each physical stop_id already only ever appears with
-# one direction. Computing real bucket occupancy precisely requires the
-# full derive+aggregate step, which now runs locally
-# (run_local_pipeline.py), not on this always-on service. Total raw
-# records per route is a cheap proxy: computable directly from files
-# already on disk, no parsing/bucketing needed.
-#
-# Per-route targets below are grounded in real observed data (2026-09-22,
-# ~17.3h of fresh collection post-redeploy): distinct stop_id counts were
-# M60+=35, Q70+=7, Q102=30. Per-day-type target = distinct_stops * 24
-# hours * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't evenly
-# spread across hours, so the slowest/sparsest bucket takes noticeably
-# longer than this average-case number to reach n=200; also a margin
-# against undercounting stops from only ~17h of data, since rarely
-# -visited stops may not have appeared yet). Recompute if CORRIDORS ever
-# changes or a route's real stop count turns out very different from
-# this session's measurement.
-#
-# Fixed 2026-09-22 (real bug, caught before it could bite): an earlier
-# version of this check tracked one combined total per route, not split
-# by day_type. Since weekday data accumulates ~5x faster than weekend
-# (5 weekdays vs. 2 weekend days per week), a combined total could be
-# satisfied almost entirely by weekday records while weekend buckets
-# stayed empty -- and the collector would auto-stop with zero usable
-# weekend reliability data. Tracking weekday and weekend independently
-# closes that gap: both must independently cross their target.
-BUS_COLLECTION_TARGETS = {
-    "M60+": {"weekday": 250_000, "weekend": 250_000},
-    "Q70+": {"weekday": 50_000, "weekend": 50_000},
-    "Q102": {"weekday": 225_000, "weekend": 225_000},
-}
+# Cost incident 2026-09-22 (continued), fixed 2026-09-28: once each
+# corridor of interest has "enough" data, collection should stop rather
+# than keep polling MTA and billing Railway forever. This used to be
+# computed HERE by scanning BUS_RAW_DIR for cumulative per-route,
+# per-day-type record counts -- but that was a real, silent bug: the
+# hourly local sync daemon (scripts/hourly_bus_sync.py) deletes every
+# raw file from this same directory shortly after pulling it, so this
+# service's own view of "how much have we collected" was being reset to
+# near-zero every hour and could never reach any real cumulative target.
+# The local machine has the only durable, undeleted view of cumulative
+# collection (nothing is ever deleted there) -- so the target-check and
+# BUS_COLLECTION_TARGETS values now live in hourly_bus_sync.py, which
+# writes BUS_COLLECTION_DONE_MARKER here (via railway ssh) once it
+# determines targets are met. This loop's only job is to notice that
+# marker and stop the collector -- it holds no target data of its own.
 BUS_COLLECTION_DONE_MARKER = Path(__file__).parent.parent / "data" / ".bus_collection_complete"
-BUS_VOLUME_CHECK_INTERVAL_S = 24 * 60 * 60
-
-
-def _bus_route_day_type_counts() -> dict[str, dict[str, int]]:
-    """Per-route record counts, split by day_type (weekday/weekend, see
-    app/day_type.py) -- the file's own date determines its day_type, so
-    this reads the date once per file, not once per line."""
-    counts = {route: {"weekday": 0, "weekend": 0} for route in CORRIDORS}
-    for path in sorted(Path(BUS_RAW_DIR).glob("*.ndjson*")):
-        service_date_str = path.name.split(".")[0]
-        try:
-            service_date = date.fromisoformat(service_date_str)
-        except ValueError:
-            continue
-        day_type = day_type_for(service_date)
-        opener = gzip.open if path.suffix == ".gz" else open
-        try:
-            with opener(path, "rt") as f:
-                for line in f:
-                    try:
-                        route = json.loads(line).get("route_id")
-                    except json.JSONDecodeError:
-                        continue
-                    if route in counts:
-                        counts[route][day_type] += 1
-        except OSError:
-            continue
-    return counts
+BUS_MARKER_CHECK_INTERVAL_S = 60 * 60  # matches hourly_bus_sync.py's own cadence --
+# checking more often than the marker could possibly appear wastes cycles, checking
+# less often would leave the collector running for up to a day past target.
 
 
 async def _run_bus_volume_check_loop(bus_collector_task: "asyncio.Task") -> None:
-    """Once every corridor in CORRIDORS crosses its BUS_COLLECTION_TARGETS
-    entry for BOTH weekday and weekend, cancels bus_collector_task (no
-    more MTA API polling, no more raw writes) and leaves a durable marker
-    file so a later redeploy/restart doesn't silently resume collecting.
-    Checked once a day, not on the collector's own 30s/5s cadences --
-    this is a cheap proxy check, not something that needs tight latency.
+    """Watches for BUS_COLLECTION_DONE_MARKER and cancels bus_collector_task
+    (no more MTA API polling, no more raw writes) as soon as it appears --
+    written by hourly_bus_sync.py once it determines every corridor has
+    crossed its per-day-type target from the durable local data. Checking
+    at startup too, not just after the first sleep, so a redeploy after
+    the marker was already written doesn't silently resume collecting.
     """
-    if BUS_COLLECTION_DONE_MARKER.exists():
-        bus_collector_task.cancel()
-        return
     while True:
-        await asyncio.sleep(BUS_VOLUME_CHECK_INTERVAL_S)
-        try:
-            counts = await asyncio.to_thread(_bus_route_day_type_counts)
-        except Exception:
-            logging.exception("bus volume check failed")
-            continue
-        target_reached = all(
-            counts.get(route, {}).get(day_type, 0) >= target
-            for route, targets_by_day_type in BUS_COLLECTION_TARGETS.items()
-            for day_type, target in targets_by_day_type.items()
-        )
-        if target_reached:
-            BUS_COLLECTION_DONE_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            BUS_COLLECTION_DONE_MARKER.write_text(json.dumps(counts))
-            logging.info("bus collection target reached, stopping collector: %s", counts)
+        if BUS_COLLECTION_DONE_MARKER.exists():
+            logging.info("bus collection marker found, stopping collector")
             bus_collector_task.cancel()
             return
+        await asyncio.sleep(BUS_MARKER_CHECK_INTERVAL_S)
 
 
 @asynccontextmanager

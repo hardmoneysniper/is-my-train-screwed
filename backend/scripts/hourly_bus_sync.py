@@ -27,11 +27,19 @@ self-looping daemon anyway: Task Scheduler's own "don't start a new
 instance if already running" setting replaces the need for this
 script to manage its own lock file).
 """
+import gzip
+import json
 import os
 import shutil
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from app.day_type import day_type_for  # noqa: E402
+from collectors.bus_collector import CORRIDORS  # noqa: E402
 
 LOCAL_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
 
@@ -39,9 +47,40 @@ PROJECT_ID = "77096939-d30b-46a4-b439-c545aff3fe25"
 SERVICE_ID = "f66ebb7b-778d-4041-bde9-d66ce5c17223"  # backend
 ENVIRONMENT_ID = "95c28f31-9ee7-465f-9046-034215422795"
 REMOTE_BUS_DIR = "/app/data/raw/bus"
+REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
+
+# Cost incident 2026-09-22, fixed 2026-09-28: this target-check used to
+# live in backend/app/main.py, computed from Railway's OWN raw/bus
+# directory -- but this script deletes every file from that same
+# directory shortly after pulling it, so main.py's view of cumulative
+# collection was being reset to near-zero every hour and could never
+# reach a real target. This machine's LOCAL_DIR is the only durable,
+# undeleted view of cumulative collection (nothing is ever deleted here)
+# -- so the target-check now runs against LOCAL_DIR, and this script
+# writes the stop marker to Railway once satisfied (main.py just watches
+# for that marker, see its own module comment).
+#
+# Per-route targets are grounded in real observed data (2026-09-22,
+# ~17.3h of fresh collection post-redeploy): distinct stop_id counts were
+# M60+=35, Q70+=7, Q102=30. Per-day-type target = distinct_stops * 24
+# hours * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't evenly
+# spread across hours, so the slowest/sparsest bucket takes noticeably
+# longer than this average-case number to reach n=200). Q3/B15 (added
+# 2026-09-28, see collectors/bus_collector.py) deliberately have NO entry
+# here yet -- their real stop counts aren't known until they've collected
+# some initial data, same as the original 3 needed before their targets
+# could be set. A corridor with no entry here is treated as "not ready"
+# (see _corridor_targets_met below), not skipped -- collection keeps
+# running for every corridor until real targets exist and are met for
+# all of them.
+BUS_COLLECTION_TARGETS = {
+    "M60+": {"weekday": 250_000, "weekend": 250_000},
+    "Q70+": {"weekday": 50_000, "weekend": 50_000},
+    "Q102": {"weekday": 225_000, "weekend": 225_000},
+}
 
 
-def _railway_ssh(*remote_args: str, timeout: int = 120) -> subprocess.CompletedProcess:
+def _railway_ssh(*remote_args: str, timeout: int = 120, input: bytes | None = None) -> subprocess.CompletedProcess:
     railway_exe = shutil.which("railway")
     if railway_exe is None:
         raise RuntimeError("railway CLI not found on PATH")
@@ -60,7 +99,7 @@ def _railway_ssh(*remote_args: str, timeout: int = 120) -> subprocess.CompletedP
     # that signal from propagating to it.
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     return subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ,
+        cmd, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=os.environ,
         timeout=timeout, creationflags=creationflags,
     )
 
@@ -84,6 +123,72 @@ def _delete_remote_file(filename: str) -> None:
     result = _railway_ssh("rm", "-f", f"{REMOTE_BUS_DIR}/{filename}")
     if result.returncode != 0:
         raise RuntimeError(f"deleting {filename} failed: {result.stderr.decode(errors='replace')}")
+
+
+def _write_remote_marker(content: str) -> None:
+    result = _railway_ssh(
+        "sh", "-c", f"mkdir -p /app/data && cat > {REMOTE_DONE_MARKER}",
+        input=content.encode("utf-8"),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"writing remote marker failed: {result.stderr.decode(errors='replace')}")
+
+
+def local_route_day_type_counts() -> dict[str, dict[str, int]]:
+    """Cumulative per-route record counts, split by day_type (weekday/
+    weekend, see app/day_type.py), computed from LOCAL_DIR -- the only
+    durable, never-deleted view of collection totals (see module
+    docstring above)."""
+    counts = {route: {"weekday": 0, "weekend": 0} for route in CORRIDORS}
+    for path in sorted(LOCAL_DIR.glob("*.ndjson*")):
+        service_date_str = path.name.split(".")[0]
+        try:
+            service_date = date.fromisoformat(service_date_str)
+        except ValueError:
+            continue
+        day_type = day_type_for(service_date)
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            with opener(path, "rt") as f:
+                for line in f:
+                    try:
+                        route = json.loads(line).get("route_id")
+                    except json.JSONDecodeError:
+                        continue
+                    if route in counts:
+                        counts[route][day_type] += 1
+        except OSError:
+            continue
+    return counts
+
+
+def all_targets_met(counts: dict[str, dict[str, int]]) -> bool:
+    """Every corridor in CORRIDORS must have a defined target in
+    BUS_COLLECTION_TARGETS AND meet it, for both weekday and weekend. A
+    corridor with no target entry yet (e.g. a newly-added one, see
+    BUS_COLLECTION_TARGETS's comment) is always "not met" -- collection
+    keeps running until real targets exist for every tracked corridor."""
+    for route in CORRIDORS:
+        targets = BUS_COLLECTION_TARGETS.get(route)
+        if targets is None:
+            return False
+        for day_type, target in targets.items():
+            if counts.get(route, {}).get(day_type, 0) < target:
+                return False
+    return True
+
+
+def check_and_maybe_stop_collection() -> bool:
+    """After a sync, checks cumulative local totals against
+    BUS_COLLECTION_TARGETS; if every tracked corridor has met its target
+    for both day types, writes the stop marker to Railway (main.py's own
+    loop watches for it and cancels the collector). Returns True if the
+    marker was (already, or just now) written."""
+    counts = local_route_day_type_counts()
+    if not all_targets_met(counts):
+        return False
+    _write_remote_marker(json.dumps(counts))
+    return True
 
 
 def sync_once() -> dict[str, int]:
@@ -123,3 +228,11 @@ if __name__ == "__main__":
         print(f"[hourly-bus-sync] pulled {pulled}", flush=True)
     else:
         print("[hourly-bus-sync] nothing new", flush=True)
+
+    try:
+        stopped = check_and_maybe_stop_collection()
+    except Exception as e:
+        print(f"[hourly-bus-sync] collection target check failed: {e!r}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if stopped:
+        print("[hourly-bus-sync] all corridor targets met, wrote stop marker to Railway", flush=True)

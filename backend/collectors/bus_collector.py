@@ -30,10 +30,18 @@ from pathlib import Path
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q70+", "M60+", "Q102"]  # spec §2 seed set + Q102 (user, 2026-08-29); Roosevelt
-# Island Tram is static-schedule, not collected here. Q102's real route_id confirmed live
-# as "Q102" -- no SBS "+" suffix, unlike Q70+/M60+ (checked directly, not assumed from
-# that pattern; not every route carries one).
+CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15"]  # spec §2 seed set + Q102 (user,
+# 2026-08-29) + Q3/B15 (user, 2026-09-28) -- the spec's own named JFK-expansion
+# candidates ("any JFK bus corridor (e.g. Q3, B15) added only through the
+# coverage-expansion pipeline on demand"). Roosevelt Island Tram is static-
+# schedule, not collected here. Q102's real route_id confirmed live as "Q102"
+# -- no SBS "+" suffix, unlike Q70+/M60+ (checked directly, not assumed from
+# that pattern; not every route carries one). Q3/B15 route_ids confirmed
+# directly against bus_queens.zip/bus_brooklyn.zip's routes.txt (route_short_name
+# "Q3"/"B15", both route_type=3, both real JFK-bound routes) -- also plain, no
+# "+" suffix. No collection targets set yet for these two (see
+# scripts/hourly_bus_sync.py's BUS_COLLECTION_TARGETS) -- real per-route stop
+# counts need some initial data first, same rigor as the original 3.
 # Note: the M subway line (as in an M-train -> Q70 transfer) is NOT added here --
 # subway isn't corridor-filtered like bus. It's covered system-wide by the Phase 2
 # subwaydata.nyc ingestion pipeline instead (see docs/superpowers/plans/

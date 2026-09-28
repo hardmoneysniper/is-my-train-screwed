@@ -6,23 +6,19 @@ collector's own logic (test_bus_collector.py). The nightly subway
 backfill/ingest + reliability_buckets aggregation that used to run here
 (and had tests here) moved to a local script -- see
 scripts/run_local_pipeline.py and its own test file -- after the
-2026-09-22 cost incident documented in main.py and CLAUDE.md."""
+2026-09-22 cost incident documented in main.py and CLAUDE.md. The
+per-corridor auto-stop target-check that used to run here (and had
+tests here) moved to scripts/hourly_bus_sync.py -- see its own test
+file -- after the 2026-09-28 fix documented in main.py: this service's
+own view of collected data was being reset hourly by the local sync
+daemon and could never reach a real cumulative target."""
 import asyncio
-import gzip
-import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import (
-    BUS_COLLECTION_DONE_MARKER,
-    BUS_COLLECTION_TARGETS,
-    _bus_route_day_type_counts,
-    _run_bus_collector_loop,
-    _run_bus_volume_check_loop,
-    app,
-)
+from app.main import _run_bus_collector_loop, _run_bus_volume_check_loop, app
 
 
 def test_proxy_rt_route_reachable_through_mount():
@@ -66,44 +62,6 @@ async def test_bus_collector_loop_restarts_immediately_after_a_failure():
     assert sleep_calls == [] or sleep_calls[0] < 3600
 
 
-def test_bus_route_day_type_counts_splits_weekday_and_weekend_and_ignores_other_routes(tmp_path):
-    # 2026-09-22 is a Tuesday (weekday); 2026-09-19 is a Saturday (weekend).
-    (tmp_path / "2026-09-22.ndjson").write_text(
-        "\n".join([
-            json.dumps({"route_id": "M60+", "other": 1}),
-            json.dumps({"route_id": "Q70+", "other": 2}),
-            json.dumps({"route_id": "M60+", "other": 3}),
-            json.dumps({"route_id": "not-a-tracked-route", "other": 4}),
-        ])
-    )
-    with gzip.open(tmp_path / "2026-09-19.ndjson.gz", "wt") as f:
-        f.write(json.dumps({"route_id": "Q102"}) + "\n")
-        f.write(json.dumps({"route_id": "M60+"}) + "\n")
-
-    with patch("app.main.BUS_RAW_DIR", tmp_path):
-        counts = _bus_route_day_type_counts()
-
-    assert counts["M60+"] == {"weekday": 2, "weekend": 1}
-    assert counts["Q70+"] == {"weekday": 1, "weekend": 0}
-    assert counts["Q102"] == {"weekday": 0, "weekend": 1}
-
-
-def test_bus_route_day_type_counts_skips_malformed_lines_and_unparseable_filenames(tmp_path):
-    (tmp_path / "2026-09-22.ndjson").write_text(
-        "\n".join([
-            json.dumps({"route_id": "M60+"}),
-            "not valid json",
-            json.dumps({"route_id": "M60+"}),
-        ])
-    )
-    (tmp_path / "malformed.ndjson").write_text(json.dumps({"route_id": "M60+"}))
-
-    with patch("app.main.BUS_RAW_DIR", tmp_path):
-        counts = _bus_route_day_type_counts()
-
-    assert counts["M60+"]["weekday"] == 2
-
-
 async def test_volume_check_loop_stops_collector_immediately_if_marker_already_exists(tmp_path):
     marker = tmp_path / ".bus_collection_complete"
     marker.write_text("{}")
@@ -115,21 +73,9 @@ async def test_volume_check_loop_stops_collector_immediately_if_marker_already_e
     fake_task.cancel.assert_called_once()
 
 
-async def test_volume_check_loop_keeps_going_when_weekend_target_not_yet_reached(tmp_path):
+async def test_volume_check_loop_keeps_polling_when_marker_does_not_exist(tmp_path):
     marker = tmp_path / ".bus_collection_complete"
     fake_task = MagicMock()
-    call_count = {"n": 0}
-
-    def weekday_met_weekend_empty(*a, **k):
-        call_count["n"] += 1
-        # Every route's weekday target is met, but weekend is still at 0 --
-        # the whole point of the day-type split is that this must NOT
-        # count as "target reached."
-        return {
-            route: {"weekday": targets["weekday"], "weekend": 0}
-            for route, targets in BUS_COLLECTION_TARGETS.items()
-        }
-
     sleep_calls = {"n": 0}
 
     async def sleep_once_then_stop(seconds):
@@ -138,31 +84,23 @@ async def test_volume_check_loop_keeps_going_when_weekend_target_not_yet_reached
             raise asyncio.CancelledError()
 
     with patch("app.main.BUS_COLLECTION_DONE_MARKER", marker), \
-         patch("app.main._bus_route_day_type_counts", side_effect=weekday_met_weekend_empty), \
          patch("app.main.asyncio.sleep", side_effect=sleep_once_then_stop):
         with pytest.raises(asyncio.CancelledError):
             await _run_bus_volume_check_loop(fake_task)
 
-    assert call_count["n"] == 1
     fake_task.cancel.assert_not_called()
-    assert not marker.exists()
+    assert sleep_calls["n"] == 2
 
 
-async def test_volume_check_loop_stops_collector_once_every_route_hits_both_day_type_targets(tmp_path):
+async def test_volume_check_loop_stops_collector_as_soon_as_marker_appears_mid_poll(tmp_path):
     marker = tmp_path / ".bus_collection_complete"
     fake_task = MagicMock()
 
-    def at_target(*a, **k):
-        return {route: dict(targets) for route, targets in BUS_COLLECTION_TARGETS.items()}
-
-    async def sleep_once(seconds):
-        return None
+    async def sleep_then_create_marker(seconds):
+        marker.write_text("{}")
 
     with patch("app.main.BUS_COLLECTION_DONE_MARKER", marker), \
-         patch("app.main._bus_route_day_type_counts", side_effect=at_target), \
-         patch("app.main.asyncio.sleep", side_effect=sleep_once):
+         patch("app.main.asyncio.sleep", side_effect=sleep_then_create_marker):
         await _run_bus_volume_check_loop(fake_task)
 
     fake_task.cancel.assert_called_once()
-    assert marker.exists()
-    assert json.loads(marker.read_text()) == BUS_COLLECTION_TARGETS
