@@ -60,23 +60,39 @@ REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
 # writes the stop marker to Railway once satisfied (main.py just watches
 # for that marker, see its own module comment).
 #
-# Per-route targets are grounded in real observed data (2026-09-22,
-# ~17.3h of fresh collection post-redeploy): distinct stop_id counts were
-# M60+=35, Q70+=7, Q102=30. Per-day-type target = distinct_stops * 24
-# hours * 200 (n-gate) * 1.5 (safety margin -- real traffic isn't evenly
-# spread across hours, so the slowest/sparsest bucket takes noticeably
-# longer than this average-case number to reach n=200). Q3/B15 (added
-# 2026-09-28, see collectors/bus_collector.py) deliberately have NO entry
-# here yet -- their real stop counts aren't known until they've collected
-# some initial data, same as the original 3 needed before their targets
-# could be set. A corridor with no entry here is treated as "not ready"
-# (see _corridor_targets_met below), not skipped -- collection keeps
-# running for every corridor until real targets exist and are met for
-# all of them.
+# Per-route targets below are grounded in real observed stop_id counts
+# from several days of real local data (2026-10-01): Q70+=7, M60+=38,
+# Q102=32, Q3=79, B15=139, Q10=43, Q72=35, Q80=33, Q90=16. Per-day-type
+# target = distinct_stops * 24 hours * 200 (n-gate) * 1.5 (safety margin
+# -- real traffic isn't evenly spread across hours, so the slowest/
+# sparsest bucket takes noticeably longer than this average-case number
+# to reach n=200). A corridor with no entry here is treated as "not
+# ready" (see all_targets_met below), not skipped.
+#
+# 2026-10-01 (user): per-route stopping, not all-or-nothing. Q70+/M60+
+# were already 2.6x-10.5x past target -- removed directly from CORRIDORS
+# in collectors/bus_collector.py (redeployed) rather than waiting for
+# every other corridor to also finish. That's now the standing pattern:
+# when a corridor's real cumulative local data clears its target with
+# margin, remove it from CORRIDORS and redeploy -- a route no longer in
+# CORRIDORS is simply no longer polled (run_forever()'s own route_id
+# filter), no runtime marker needed for a single route. The
+# BUS_COLLECTION_DONE_MARKER/all_targets_met mechanism below still
+# matters for the terminal case: once every corridor still in CORRIDORS
+# has individually been removed this way, CORRIDORS is empty,
+# all_targets_met() trivially passes, and this script writes the marker
+# so main.py cancels the collector task entirely rather than running an
+# idle poller.
 BUS_COLLECTION_TARGETS = {
-    "M60+": {"weekday": 250_000, "weekend": 250_000},
-    "Q70+": {"weekday": 50_000, "weekend": 50_000},
-    "Q102": {"weekday": 225_000, "weekend": 225_000},
+    "Q70+": {"weekday": 50_400, "weekend": 50_400},
+    "M60+": {"weekday": 273_600, "weekend": 273_600},
+    "Q102": {"weekday": 230_400, "weekend": 230_400},
+    "Q3": {"weekday": 568_800, "weekend": 568_800},
+    "B15": {"weekday": 1_000_800, "weekend": 1_000_800},
+    "Q10": {"weekday": 309_600, "weekend": 309_600},
+    "Q72": {"weekday": 252_000, "weekend": 252_000},
+    "Q80": {"weekday": 237_600, "weekend": 237_600},
+    "Q90": {"weekday": 115_200, "weekend": 115_200},
 }
 
 

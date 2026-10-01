@@ -30,21 +30,29 @@ from pathlib import Path
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec
-# §2 seed set + Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's
-# own named JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
+CORRIDORS = ["Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
+# Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
+# JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
 # picked over Q06/Q07 which serve JFK's cargo area rather than passenger
 # terminals). Roosevelt Island Tram is static-schedule, not collected here.
+#
+# 2026-10-01 (user): "stop a route when you think there is enough data for
+# it" -- per-route stopping, not all-or-nothing. Q70+ and M60+ removed here
+# (no longer polled -- run_forever()'s own route_id filter just skips
+# anything not in this list) after real cumulative local data cleared their
+# targets by 2.6x-10.5x (see scripts/hourly_bus_sync.py's
+# BUS_COLLECTION_TARGETS for the real per-route targets and the standing
+# instruction to keep doing this during periodic checks). Their real stop
+# counts (Q70+=7, M60+=38) and derived targets stay in that file for
+# reference even though they're no longer actively collected.
+#
 # Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
 # Q70+/M60+ (checked directly, not assumed from that pattern; not every route
 # carries one). Q3/B15/Q10/Q72/Q80/Q90 route_ids all confirmed directly
 # against the real bus.zip/bus_queens.zip/bus_brooklyn.zip routes.txt (route_
 # short_name matches route_id exactly for all six, all route_type=3, all
-# real JFK- or LGA-bound routes) -- also all plain, no "+" suffix. No
-# collection targets set yet for any of these six (see
-# scripts/hourly_bus_sync.py's BUS_COLLECTION_TARGETS) -- real per-route stop
-# counts need some initial data first, same rigor as the original 3.
+# real JFK- or LGA-bound routes) -- also all plain, no "+" suffix.
 # Note: the M subway line (as in an M-train -> Q70 transfer) is NOT added here --
 # subway isn't corridor-filtered like bus. It's covered system-wide by the Phase 2
 # subwaydata.nyc ingestion pipeline instead (see docs/superpowers/plans/
