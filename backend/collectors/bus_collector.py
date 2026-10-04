@@ -30,7 +30,7 @@ from pathlib import Path
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q102", "Q3", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
+CORRIDORS = ["Q102", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
@@ -49,7 +49,9 @@ CORRIDORS = ["Q102", "Q3", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 #
 # 2026-10-04: B15 removed too, after real cumulative local data cleared
 # both its weekday (437%) and weekend (113%) targets following the first
-# full weekend since it started collecting.
+# full weekend since it started collecting. Q3 (340%/100%) and Q10
+# (340%/103%) also removed same day once the next periodic check showed
+# both clearing their targets.
 #
 # Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
 # Q70+/M60+ (checked directly, not assumed from that pattern; not every route
