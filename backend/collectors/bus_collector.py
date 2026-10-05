@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
@@ -203,12 +204,21 @@ def poll_once(key: str) -> list[dict]:
     return records
 
 
-def run_forever():
+def run_forever(should_continue: Callable[[], bool] | None = None):
+    """Polls forever until an unhandled exception (existing behavior,
+    unchanged for the default should_continue=None) OR, if
+    should_continue is given, until it returns False -- checked once per
+    cycle, not mid-cycle, so this returns within one POLL_INTERVAL_SECONDS
+    of should_continue flipping, not instantly. Added 2026-10-05 (user):
+    all remaining corridors are already well past their weekday targets,
+    only weekend data is still needed -- main.py now wraps this with a
+    weekend-only should_continue so collection pauses on weekdays instead
+    of continuing to collect data nobody needs."""
     key = _api_key()
     backoff = POLL_INTERVAL_SECONDS
     print(f"[bus_collector] starting, corridors={CORRIDORS}, interval={POLL_INTERVAL_SECONDS}s, "
           f"writing to {DATA_DIR}", flush=True)
-    while True:
+    while should_continue is None or should_continue():
         cycle_start = time.monotonic()
         try:
             records = poll_once(key)

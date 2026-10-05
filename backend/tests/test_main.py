@@ -39,7 +39,7 @@ def test_proxy_rt_route_reachable_through_mount():
 async def test_bus_collector_loop_restarts_immediately_after_a_failure():
     call_count = {"n": 0}
 
-    def failing_run_forever():
+    def failing_run_forever(should_continue=None):
         call_count["n"] += 1
         raise RuntimeError("boom")
 
@@ -49,7 +49,8 @@ async def test_bus_collector_loop_restarts_immediately_after_a_failure():
         sleep_calls.append(seconds)
         raise asyncio.CancelledError()
 
-    with patch("app.main.run_forever", side_effect=failing_run_forever), \
+    with patch("app.main._is_weekend", return_value=True), \
+         patch("app.main.run_forever", side_effect=failing_run_forever), \
          patch("app.main.asyncio.sleep", side_effect=record_sleep_then_stop), \
          patch("app.main.logging.exception") as mock_log_exception:
         with pytest.raises(asyncio.CancelledError):
@@ -60,6 +61,49 @@ async def test_bus_collector_loop_restarts_immediately_after_a_failure():
     # Restarts immediately on failure, not on the 24h aggregation cadence --
     # confirm whatever sleep duration is used is small (seconds, not a day).
     assert sleep_calls == [] or sleep_calls[0] < 3600
+
+
+async def test_bus_collector_loop_does_not_poll_on_weekdays():
+    call_count = {"n": 0}
+
+    def should_not_be_called(should_continue=None):
+        call_count["n"] += 1
+
+    sleep_calls = []
+
+    async def record_sleep_then_stop(seconds):
+        sleep_calls.append(seconds)
+        raise asyncio.CancelledError()
+
+    with patch("app.main._is_weekend", return_value=False), \
+         patch("app.main.run_forever", side_effect=should_not_be_called), \
+         patch("app.main.asyncio.sleep", side_effect=record_sleep_then_stop):
+        with pytest.raises(asyncio.CancelledError):
+            await _run_bus_collector_loop()
+
+    assert call_count["n"] == 0
+    # Re-checks hourly while paused, not on the 5s crash-restart cadence.
+    assert sleep_calls == [3600]
+
+
+async def test_bus_collector_loop_polls_on_weekends_passing_is_weekend_as_should_continue():
+    received_should_continue = {}
+
+    def capture_should_continue(should_continue=None):
+        received_should_continue["fn"] = should_continue
+
+    async def stop_after_one_cycle(seconds):
+        raise asyncio.CancelledError()
+
+    with patch("app.main._is_weekend", return_value=True) as mock_is_weekend, \
+         patch("app.main.run_forever", side_effect=capture_should_continue), \
+         patch("app.main.asyncio.sleep", side_effect=stop_after_one_cycle):
+        with pytest.raises(asyncio.CancelledError):
+            await _run_bus_collector_loop()
+
+    # run_forever must receive _is_weekend itself (so it can stop mid-poll
+    # once the weekend ends), not a one-off boolean snapshot.
+    assert received_should_continue["fn"] is mock_is_weekend
 
 
 async def test_volume_check_loop_stops_collector_immediately_if_marker_already_exists(tmp_path):
