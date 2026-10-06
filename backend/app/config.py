@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # REALTIME_PROXY_BASE_URL's Railway value depend on this same number
     # (Task 10 brief).
     port: int = 8000
+    geoclient_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

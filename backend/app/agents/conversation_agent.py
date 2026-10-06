@@ -8,10 +8,12 @@ from app.routing.nearest_stop import get_stop_index
 from app.agents.tools import (
     CANCEL_MONITORED_TRIP_TOOL,
     CREATE_MONITORED_TRIP_TOOL,
+    FIND_ADDRESS_TOOL,
     FIND_STOP_TOOL,
     GET_RISK_TOOL,
     PLAN_ROUTE_TOOL,
 )
+from app.geocode import geocode_address
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
 from app import deadline, monitoring, risk_engine
@@ -39,6 +41,10 @@ SYSTEM_PROMPT = (
     "those coordinates directly with plan_route — never call find_stop for "
     "this case. If they reference their current location but no marker is "
     "present, ask them to share their location or name a place instead. "
+    "If the user types a street address, call find_address to resolve it, "
+    "then use the result's lat/lon with plan_route — if it returns null, "
+    "tell them you couldn't find that address and ask them to clarify or "
+    "try a stop name instead, never invent coordinates. "
     "Keep answers to 1-3 sentences.\n\n"
     "Walking directions: when an itinerary includes a WALK leg, condense its "
     "steps into 1-2 natural sentences using the real street names, distances, "
@@ -132,6 +138,7 @@ class ConversationAgent:
                 PLAN_ROUTE_TOOL,
                 GET_RISK_TOOL,
                 FIND_STOP_TOOL,
+                FIND_ADDRESS_TOOL,
                 CREATE_MONITORED_TRIP_TOOL,
                 CANCEL_MONITORED_TRIP_TOOL,
             ],
@@ -237,6 +244,9 @@ class ConversationAgent:
                 elif tool_use.name == "find_stop":
                     matches = get_stop_index().find_by_name(tool_use.input["query"])
                     content = json.dumps(matches)
+                elif tool_use.name == "find_address":
+                    result = await geocode_address(tool_use.input["address"])
+                    content = json.dumps(result)
                 elif tool_use.name == "create_monitored_trip":
                     content = self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
                 elif tool_use.name == "cancel_monitored_trip":

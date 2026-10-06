@@ -1018,3 +1018,50 @@ async def test_no_user_location_key_when_not_given(monkeypatch):
 
     sent_user_message = captured_messages[0][-1]["content"]
     assert "location" not in sent_user_message.lower()
+
+
+# --- Task 5: find_address tool dispatch -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_address_tool_dispatches_to_geocode_address(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("find_address", {"address": "2 west loop road manhattan"})
+        return _text_response("Found it.")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.geocode_address",
+        AsyncMock(return_value={"lat": 40.756552, "lon": -73.955881}),
+    )
+
+    await agent.respond("plan from 2 west loop road manhattan", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert "40.756552" in tool_result_content
+    assert "-73.955881" in tool_result_content
+
+
+@pytest.mark.asyncio
+async def test_find_address_tool_passes_through_none_on_no_match(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("find_address", {"address": "roosevelt island"})
+        return _text_response("Couldn't find that — try a stop name?")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr("app.agents.conversation_agent.geocode_address", AsyncMock(return_value=None))
+
+    await agent.respond("plan from roosevelt island the neighborhood", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert tool_result_content == "null"

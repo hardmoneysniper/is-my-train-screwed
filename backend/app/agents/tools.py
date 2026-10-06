@@ -26,6 +26,18 @@ FIND_STOP_TOOL = {
     },
 }
 
+FIND_ADDRESS_TOOL = {
+    "name": "find_address",
+    "description": "Look up a typed street address within NYC to get its coordinates (e.g. '2 West Loop Road, Manhattan'). Include a real NYC borough name if you know one — a neighborhood nickname (e.g. 'Roosevelt Island') may not match as well as a real borough name. Call this when the user types an address instead of naming a transit stop or giving their current location, then use the result's lat/lon with plan_route. If it returns no match, ask the user to clarify or try a stop name instead — never guess coordinates.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "address": {"type": "string", "description": "The free-text address to geocode, ideally including a real NYC borough name."},
+        },
+        "required": ["address"],
+    },
+}
+
 GET_RISK_TOOL = {
     "name": "get_risk",
     "description": "Check transfer-miss probability for the itinerary you just planned. Never estimate this yourself — always call this tool and narrate its exact result.",
