@@ -9,9 +9,9 @@ import pytest
 
 from app import risk_engine
 from app.agents.conversation_agent import CITATION_FOOTER_TEMPLATE
-from app.agents.replan_agent import replan_trip
+from app.agents.replan_agent import condense_walk_steps, replan_trip
 from app.models.monitoring import MonitoredTrip
-from app.models.transit import Itinerary, Leg
+from app.models.transit import Itinerary, Leg, WalkStep
 from app.monitoring import create_monitored_trip
 from app.route_index import RouteIndex
 from app.routing.nearest_stop import StopIndex
@@ -145,6 +145,132 @@ def _expected_clock(depart_by_ts: int) -> str:
 
 _WORKED_EXAMPLE_COUNTS = [200.0 if i == 20 else (50.0 if i == 21 else 0.0) for i in range(101)]  # p85 = 60.0s
 _OTHER_COUNTS = [300.0 if i == 15 else 0.0 for i in range(101)]  # p85 = -120.0s
+
+
+# --- condense_walk_steps: deterministic, template-only walk narration ---
+
+
+def test_condense_walk_steps_merges_consecutive_same_direction():
+    steps = [
+        WalkStep(street_name="Main St", distance_meters=50, relative_direction="LEFT"),
+        WalkStep(street_name="Main St", distance_meters=30, relative_direction="LEFT"),
+        WalkStep(street_name="Broadway", distance_meters=100, relative_direction="RIGHT"),
+    ]
+    result = condense_walk_steps(steps)
+    assert result == "Turn left on Main St, then turn right on Broadway."
+
+
+def test_condense_walk_steps_covers_every_real_enum_value():
+    enum_to_expected_phrase = {
+        "CIRCLE_CLOCKWISE": "circle around",
+        "CIRCLE_COUNTERCLOCKWISE": "circle around",
+        "CONTINUE": "continue straight",
+        "DEPART": "head north",
+        "ELEVATOR": "take the elevator",
+        "ENTER_STATION": "enter the station",
+        "EXIT_STATION": "exit the station",
+        "FOLLOW_SIGNS": "follow the signs",
+        "HARD_LEFT": "turn sharply left",
+        "HARD_RIGHT": "turn sharply right",
+        "LEFT": "turn left",
+        "RIGHT": "turn right",
+        "SLIGHTLY_LEFT": "bear left",
+        "SLIGHTLY_RIGHT": "bear right",
+        "UTURN_LEFT": "make a U-turn",
+        "UTURN_RIGHT": "make a U-turn",
+    }
+    for enum_value, phrase in enum_to_expected_phrase.items():
+        step = WalkStep(street_name="Test St", distance_meters=10, relative_direction=enum_value, absolute_direction="NORTH")
+        result = condense_walk_steps([step])
+        assert phrase.lower() in result.lower(), f"{enum_value} -> expected phrase fragment {phrase!r} in {result!r}"
+
+
+def test_condense_walk_steps_handles_null_street_name():
+    steps = [WalkStep(street_name=None, distance_meters=20, relative_direction="CONTINUE")]
+    result = condense_walk_steps(steps)
+    assert "continue straight" in result.lower()
+    assert "None" not in result
+
+
+def test_condense_walk_steps_empty_list_returns_empty_string():
+    assert condense_walk_steps([]) == ""
+
+
+# --- destination resolution: true to_lat/to_lon vs. StopIndex fallback --
+
+
+@pytest.mark.asyncio
+async def test_replan_uses_true_destination_lat_lon_when_present(conn):
+    old_itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[_subway_leg("F", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                           _local_ms(2026, 9, 1, 8), _local_ms(2026, 9, 1, 8, 20))],
+    )
+    trip = _create_trip(conn, old_itinerary)
+
+    # Give the stored itinerary's final leg a real to_lat/to_lon, distinct
+    # from stop_index's "Transfer Stop" coordinates -- proves the new
+    # resolution path is actually used, not silently falling back.
+    stored = MonitoredTrip.model_validate({
+        **trip.model_dump(),
+        "itinerary_snapshot": Itinerary(duration_seconds=900, legs=[
+            Leg(
+                mode="SUBWAY", route_short_name="F", from_stop_id="mtasbwy:A1", from_stop_name="Roosevelt Island",
+                to_stop_id="mtasbwy:A2", to_stop_name="Transfer Stop",
+                start_time_ms=_local_ms(2026, 9, 1, 8), end_time_ms=_local_ms(2026, 9, 1, 8, 20),
+                to_lat=40.9999, to_lon=-73.9999,
+            ),
+        ]),
+    })
+
+    new_itinerary = Itinerary(
+        duration_seconds=600,
+        legs=[_subway_leg("Q", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                           _local_ms(2026, 9, 1, 8), _local_ms(2026, 9, 1, 8, 10))],
+    )
+
+    with patch("app.agents.replan_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan:
+        mock_plan.return_value = [new_itinerary]
+        await replan_trip(stored, "test", conn=conn)
+
+    call_args = mock_plan.await_args.args
+    assert call_args[2] == 40.9999  # to_lat positional arg
+    assert call_args[3] == -73.9999  # to_lon positional arg
+
+
+@pytest.mark.asyncio
+async def test_replan_falls_back_to_stop_index_when_to_lat_absent(conn):
+    old_itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[_subway_leg("F", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                           _local_ms(2026, 9, 1, 8), _local_ms(2026, 9, 1, 8, 20))],
+    )
+    trip = _create_trip(conn, old_itinerary)
+
+    # This trip's stored leg has no to_lat/to_lon (an old trip predating
+    # Task 1) -- must still resolve via stop_index, not crash.
+    with patch("app.agents.replan_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan:
+        mock_plan.return_value = []
+        result = await replan_trip(trip, "test", conn=conn)
+
+    assert result is None  # OTP found nothing, but it didn't crash resolving the destination
+
+
+def test_build_notification_includes_condensed_walk_directions():
+    from app.agents.replan_agent import _build_notification
+
+    itinerary = Itinerary(duration_seconds=900, legs=[
+        _subway_leg("Q", "A2", "A3", "Transfer Stop", "Lex/63", _local_ms(2026, 9, 1, 8), _local_ms(2026, 9, 1, 8, 10)),
+        Leg(
+            mode="WALK", from_stop_name="Lex/63", to_stop_name="2 West Loop Rd",
+            start_time_ms=_local_ms(2026, 9, 1, 8, 10), end_time_ms=_local_ms(2026, 9, 1, 8, 15),
+            steps=[WalkStep(street_name="Main St", distance_meters=50, relative_direction="LEFT")],
+        ),
+    ])
+
+    text = _build_notification(itinerary, [], None)
+
+    assert "turn left on main st" in text.lower()
 
 
 # --- Test 1: zero-transfer trip reroutes into a real transfer risk -------

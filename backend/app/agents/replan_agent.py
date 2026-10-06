@@ -48,11 +48,60 @@ from app import deadline, risk_engine
 from app.agents.conversation_agent import CITATION_FOOTER_TEMPLATE
 from app.config import settings
 from app.models.monitoring import MonitoredTrip
-from app.models.transit import Itinerary
+from app.models.transit import Itinerary, WalkStep
 from app.risk_engine import LOCAL_TZ
 from app.routing.nearest_stop import get_stop_index
 from app.routing.otp_client import OTPClient
 from db import get_connection
+
+_DIRECTION_PHRASES = {
+    "CIRCLE_CLOCKWISE": "circle around",
+    "CIRCLE_COUNTERCLOCKWISE": "circle around",
+    "CONTINUE": "continue straight",
+    "ELEVATOR": "take the elevator",
+    "ENTER_STATION": "enter the station",
+    "EXIT_STATION": "exit the station",
+    "FOLLOW_SIGNS": "follow the signs",
+    "HARD_LEFT": "turn sharply left",
+    "HARD_RIGHT": "turn sharply right",
+    "LEFT": "turn left",
+    "RIGHT": "turn right",
+    "SLIGHTLY_LEFT": "bear left",
+    "SLIGHTLY_RIGHT": "bear right",
+    "UTURN_LEFT": "make a U-turn",
+    "UTURN_RIGHT": "make a U-turn",
+}
+
+
+def _phrase_for_step(step: WalkStep) -> str:
+    if step.relative_direction == "DEPART":
+        direction = (step.absolute_direction or "").lower() or "the route"
+        phrase = f"head {direction}"
+    else:
+        phrase = _DIRECTION_PHRASES.get(step.relative_direction or "", "continue")
+    if step.street_name:
+        return f"{phrase} on {step.street_name}"
+    return phrase
+
+
+def condense_walk_steps(steps: list[WalkStep]) -> str:
+    """Deterministic, template-only walk-step condenser for the Re-plan
+    Agent's notification text -- the Re-plan Agent is template-first by
+    design (spec §9.1's cost envelope), so this is a lookup table over
+    OTP's real confirmed-live enum values, not LLM narration (contrast
+    Task 2's Conversation Agent path, which DOES use LLM prose since the
+    primary chat path already does that for every other leg detail)."""
+    if not steps:
+        return ""
+    merged: list[str] = []
+    prev_direction = None
+    for step in steps:
+        if step.relative_direction == prev_direction and merged:
+            continue  # consecutive same-direction steps collapse into the first phrase
+        merged.append(_phrase_for_step(step))
+        prev_direction = step.relative_direction
+    sentence = ", then ".join(merged)
+    return sentence[0].upper() + sentence[1:] + "."
 
 
 def _route_signature(itinerary: Itinerary) -> tuple:
@@ -86,15 +135,23 @@ def _build_notification(new_itinerary: Itinerary, new_risks: list, depart_by_ts:
     route_summary = _route_summary(new_itinerary)
     citation_risk = next((r for r in new_risks if r.quality == "ok"), None)
 
+    walk_notes = []
+    for leg in new_itinerary.legs:
+        if leg.mode == "WALK" and leg.steps:
+            condensed = condense_walk_steps(leg.steps)
+            if condensed:
+                walk_notes.append(condensed)
+    walk_suffix = f" {' '.join(walk_notes)}" if walk_notes else ""
+
     if citation_risk is None:
-        text = f"Your trip has been rerouted: now via {route_summary}. No transfer risk to report for the new route."
+        text = f"Your trip has been rerouted: now via {route_summary}.{walk_suffix} No transfer risk to report for the new route."
         if depart_by_ts is not None:
             text += f" Based on the new route, you should now aim to leave by {_format_departure_clock(depart_by_ts)}."
     else:
         pct = round(citation_risk.p_miss * 100)
         footer = CITATION_FOOTER_TEMPLATE.format(n=round(citation_risk.n), window_days=citation_risk.window_days)
         body = (
-            f"Your trip has been rerouted: now via {route_summary}. There's about a "
+            f"Your trip has been rerouted: now via {route_summary}.{walk_suffix} There's about a "
             f"{pct}%* chance of missing the {citation_risk.from_route}->{citation_risk.to_route} "
             f"transfer at {citation_risk.transfer_stop_name}."
         )
@@ -140,13 +197,26 @@ async def replan_trip(trip: MonitoredTrip, trigger_reason: str, conn: sqlite3.Co
 
         stop_index = get_stop_index()
         origin_stop = stop_index.find_by_id(risk_engine._strip_feed_prefix(transit_legs[0].from_stop_id))
-        dest_stop = stop_index.find_by_id(risk_engine._strip_feed_prefix(transit_legs[-1].to_stop_id))
-        if origin_stop is None or dest_stop is None:
+        if origin_stop is None:
             return None  # a stop that no longer resolves against static GTFS
+
+        # The true, originally-stated destination doesn't change over the
+        # trip's lifetime (unlike the origin, which goes stale the moment
+        # the user starts moving) -- prefer it directly over the
+        # last-transit-stop approximation whenever Task 1's lat/lon fields
+        # are present on the stored snapshot's final leg.
+        last_leg = trip.itinerary_snapshot.legs[-1]
+        if last_leg.to_lat is not None and last_leg.to_lon is not None:
+            dest_lat, dest_lon = last_leg.to_lat, last_leg.to_lon
+        else:
+            dest_stop = stop_index.find_by_id(risk_engine._strip_feed_prefix(transit_legs[-1].to_stop_id))
+            if dest_stop is None:
+                return None
+            dest_lat, dest_lon = dest_stop["lat"], dest_stop["lon"]
 
         otp = OTPClient(base_url=settings.otp_base_url)
         itineraries = await otp.plan_route(
-            origin_stop["lat"], origin_stop["lon"], dest_stop["lat"], dest_stop["lon"]
+            origin_stop["lat"], origin_stop["lon"], dest_lat, dest_lon
         )
         if not itineraries:
             # OTP found no route at all -- a documented simplification, not
