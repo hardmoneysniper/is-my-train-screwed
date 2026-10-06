@@ -1,5 +1,5 @@
 import httpx
-from app.models.transit import Itinerary, Leg
+from app.models.transit import Itinerary, Leg, WalkStep
 
 PLAN_QUERY = """
 query Plan($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!) {
@@ -9,12 +9,14 @@ query Plan($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!) {
       legs {
         mode
         route { shortName }
-        from { name stop { gtfsId } }
-        to { name stop { gtfsId } }
+        from { name stop { gtfsId } lat lon }
+        to { name stop { gtfsId } lat lon }
         startTime
         endTime
         realTime
         arrivalDelay
+        headsign
+        steps { streetName distance relativeDirection absoluteDirection exit stayOn }
       }
     }
   }
@@ -54,6 +56,22 @@ class OTPClient:
                         end_time_ms=leg["endTime"],
                         real_time=leg.get("realTime", False),
                         arrival_delay_seconds=leg.get("arrivalDelay"),
+                        headsign=leg.get("headsign"),
+                        steps=[
+                            WalkStep(
+                                street_name=step.get("streetName"),
+                                distance_meters=step["distance"],
+                                relative_direction=step.get("relativeDirection"),
+                                absolute_direction=step.get("absoluteDirection"),
+                                exit=step.get("exit"),
+                                stay_on=step.get("stayOn", False),
+                            )
+                            for step in (leg.get("steps") or [])
+                        ],
+                        from_lat=leg["from"].get("lat"),
+                        from_lon=leg["from"].get("lon"),
+                        to_lat=leg["to"].get("lat"),
+                        to_lon=leg["to"].get("lon"),
                     )
                     for leg in it["legs"]
                 ],
