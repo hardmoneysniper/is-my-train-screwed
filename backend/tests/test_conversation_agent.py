@@ -1065,3 +1065,38 @@ async def test_find_address_tool_passes_through_none_on_no_match(monkeypatch):
 
     tool_result_content = captured_messages[1][-1]["content"][0]["content"]
     assert tool_result_content == "null"
+
+
+# --- Task 6: mid-trip destination change ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_destination_change_cancels_trip_before_replanning(monkeypatch):
+    import json
+
+    agent = ConversationAgent()
+    captured_messages = []
+    tool_call_order = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("cancel_monitored_trip", {})
+        if len(captured_messages) == 2:
+            return _tool_use_response("plan_route", {"from_lat": 40.76, "from_lon": -73.95, "to_lat": 40.77, "to_lon": -73.96})
+        return _text_response("Okay, rerouting you.")
+
+    def fake_cancel(tool_input, anonymous_id):
+        tool_call_order.append("cancel_monitored_trip")
+        return json.dumps({"cancelled": True, "trip_id": 1})
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(agent, "_handle_cancel_monitored_trip", fake_cancel)
+    monkeypatch.setattr(agent._otp, "plan_route", AsyncMock(return_value=[]))
+
+    await agent.respond(
+        "actually take me to Lex/63 instead", [], "anon-1",
+        user_location={"lat": 40.76, "lon": -73.95},
+    )
+
+    assert tool_call_order == ["cancel_monitored_trip"]

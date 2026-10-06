@@ -97,7 +97,16 @@ SYSTEM_PROMPT = (
     "user has more than one active monitored trip; list the real trips from its\n"
     "active_trips field and ask which one they mean, then call\n"
     "cancel_monitored_trip again with the trip_id they pick. Never guess which\n"
-    "trip they mean and never cancel more than one trip for one request."
+    "trip they mean and never cancel more than one trip for one request.\n\n"
+    "Mid-trip destination change: if the user changes their destination while "
+    "a trip is active (e.g. 'actually take me to X instead'), first call "
+    "cancel_monitored_trip with no trip_id (it auto-resolves their active "
+    "trip), then get their current location the same way as any other "
+    "current-location reference (use it if already present on the message, "
+    "otherwise ask for it), then call plan_route fresh from that location to "
+    "the newly-named destination (resolving it via find_stop/find_address "
+    "same as any new trip request), then fall through to this prompt's "
+    "normal monitoring-offer logic for the new trip."
 )
 
 # system + tools are identical on every turn, so they're cached as one unit.
