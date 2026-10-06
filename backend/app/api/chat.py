@@ -18,11 +18,12 @@ class ChatRequest(BaseModel):
     conversation_history: list[ChatMessage]
     anonymous_id: str  # passed through to respond() for monitored-trip tool dispatch (Task 5);
     # Task 8 additionally uses it inside respond() to claim + prepend pending notifications
+    user_location: dict | None = None  # {"lat": float, "lon": float} or None -- walking-nav design doc §2
 
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
     agent = ConversationAgent()
     history = [{"role": m.role, "content": m.content} for m in req.conversation_history]
-    reply = await agent.respond(req.message, history, req.anonymous_id)
+    reply = await agent.respond(req.message, history, req.anonymous_id, req.user_location)
     return {"reply": reply}

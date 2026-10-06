@@ -33,7 +33,12 @@ SYSTEM_PROMPT = (
     "available yet for that transfer rather than stating a number. "
     "If the user names a place instead of giving coordinates, call "
     "find_stop first to resolve it, then use the result's lat/lon with "
-    "plan_route — never invent coordinates. "
+    "plan_route — never invent coordinates. If the user refers to their "
+    "current location (e.g. 'from here', 'near me') and a "
+    "[User's current location: ...] marker is present on the message, use "
+    "those coordinates directly with plan_route — never call find_stop for "
+    "this case. If they reference their current location but no marker is "
+    "present, ask them to share their location or name a place instead. "
     "Keep answers to 1-3 sentences.\n\n"
     "Walking directions: when an itinerary includes a WALK leg, condense its "
     "steps into 1-2 natural sentences using the real street names, distances, "
@@ -196,17 +201,24 @@ class ConversationAgent:
         cancelled = monitoring.cancel_monitored_trip(trip_id, anonymous_id)
         return json.dumps({"cancelled": cancelled, "trip_id": trip_id})
 
-    async def respond(self, user_message: str, conversation_history: list[dict], anonymous_id: str) -> str:
+    async def respond(
+        self, user_message: str, conversation_history: list[dict], anonymous_id: str,
+        user_location: dict | None = None,
+    ) -> str:
         # Current time is injected into this per-call user message only --
         # never into the cached SYSTEM_PROMPT/_SYSTEM_BLOCKS, which must stay
         # byte-identical across calls for Anthropic's prompt caching to work
         # (see the comment above _SYSTEM_BLOCKS). Interpolating datetime.now()
         # into the system block would silently break that caching on every
         # call. The LLM needs today's date/time to parse a stated deadline
-        # ("by 6pm") into a real epoch-ms timestamp.
+        # ("by 6pm") into a real epoch-ms timestamp. user_location follows
+        # the identical pattern, for the identical reason.
         now_iso = datetime.now(timezone.utc).isoformat()
+        prefix = f"[Current time: {now_iso}]"
+        if user_location is not None:
+            prefix += f"\n[User's current location: {user_location['lat']}, {user_location['lon']}]"
         messages = conversation_history + [
-            {"role": "user", "content": f"[Current time: {now_iso}]\n{user_message}"}
+            {"role": "user", "content": f"{prefix}\n{user_message}"}
         ]
 
         response = await self._create(messages)

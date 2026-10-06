@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 import cost_guard
-from app.agents.conversation_agent import ConversationAgent
+from app.agents.conversation_agent import ConversationAgent, SYSTEM_PROMPT
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary, Leg, WalkStep
 from app.models.risk import TransferRisk
@@ -977,3 +977,44 @@ async def test_plan_route_tool_result_carries_real_headsign_and_steps(monkeypatc
     tool_result_content = captured_messages[1][-1]["content"][0]["content"]
     assert "Main St" in tool_result_content
     assert "96 St" in tool_result_content
+
+
+# --- Task 3: user_location plumbing -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_user_location_injected_into_user_message_not_system_prompt(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        return _text_response("You're near Roosevelt Island.")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+
+    await agent.respond("where am I", [], "anon-1", user_location={"lat": 40.7597, "lon": -73.9532})
+
+    sent_user_message = captured_messages[0][-1]["content"]
+    assert "40.7597" in sent_user_message
+    assert "-73.9532" in sent_user_message
+    # Never in the cached system block -- that must stay byte-identical
+    # across calls regardless of user_location, or prompt caching breaks.
+    assert "40.7597" not in SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_no_user_location_key_when_not_given(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        return _text_response("Sure, where are you headed from?")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+
+    await agent.respond("plan a trip", [], "anon-1")
+
+    sent_user_message = captured_messages[0][-1]["content"]
+    assert "location" not in sent_user_message.lower()

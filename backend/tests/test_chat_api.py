@@ -36,6 +36,7 @@ def test_chat_converts_conversation_history_to_dicts():
             {"role": "assistant", "content": "where to?"},
         ],
         "11111111-1111-1111-1111-111111111111",
+        None,
     )
 
 
@@ -57,7 +58,7 @@ def test_chat_passes_anonymous_id_through_to_respond():
         })
     assert response.status_code == 200
     mock_respond.assert_awaited_once_with(
-        "and then?", [], "22222222-2222-2222-2222-222222222222"
+        "and then?", [], "22222222-2222-2222-2222-222222222222", None
     )
 
 
@@ -67,3 +68,19 @@ def test_chat_missing_anonymous_id_returns_422():
         "conversation_history": [],
     })
     assert response.status_code == 422
+
+
+def test_chat_passes_user_location_through_to_respond():
+    with patch("app.api.chat.ConversationAgent.respond", new_callable=AsyncMock) as mock_respond:
+        mock_respond.return_value = "sure"
+        response = client.post("/chat", json={
+            "message": "take me from here",
+            "conversation_history": [],
+            "anonymous_id": "33333333-3333-3333-3333-333333333333",
+            "user_location": {"lat": 40.7597, "lon": -73.9532},
+        })
+    assert response.status_code == 200
+    mock_respond.assert_awaited_once_with(
+        "take me from here", [], "33333333-3333-3333-3333-333333333333",
+        {"lat": 40.7597, "lon": -73.9532},
+    )
