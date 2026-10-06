@@ -5,7 +5,7 @@ import pytest
 import cost_guard
 from app.agents.conversation_agent import ConversationAgent
 from app.models.monitoring import MonitoredTrip
-from app.models.transit import Itinerary, Leg
+from app.models.transit import Itinerary, Leg, WalkStep
 from app.models.risk import TransferRisk
 
 
@@ -38,6 +38,17 @@ def _fake_usage(input_tokens=100, output_tokens=20, cache_creation=0, cache_read
         "cache_creation_input_tokens": cache_creation,
         "cache_read_input_tokens": cache_read,
     }))
+
+
+def _tool_use_response(tool_name, tool_input):
+    block = MagicMock(type="tool_use", input=tool_input, id="tu_1")
+    block.name = tool_name  # see _tool_use's comment on why .name is set post-construction
+    return MagicMock(stop_reason="tool_use", content=[block])
+
+
+def _text_response(text):
+    block = MagicMock(type="text", text=text)
+    return MagicMock(stop_reason="end_turn", content=[block])
 
 
 @pytest.fixture(autouse=True)
@@ -926,3 +937,43 @@ async def test_sequential_respond_calls_only_surface_seeded_notification_once(tm
 
     assert first_reply == "Your F train is delayed.\n\nSure, here's your answer."
     assert second_reply == "Sure, here's your answer."
+
+
+@pytest.mark.asyncio
+async def test_plan_route_tool_result_carries_real_headsign_and_steps(monkeypatch):
+    # Mirrors this file's existing plan_route-dispatch test pattern: can't
+    # test LLM prose quality, CAN test the data reaching the LLM is real
+    # and present -- same honesty caveat as every other prompt-driven test
+    # in this codebase.
+    agent = ConversationAgent()
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="WALK", from_stop_name="2 West Loop Rd", to_stop_name="Roosevelt Island",
+                start_time_ms=0, end_time_ms=300000,
+                steps=[WalkStep(street_name="Main St", distance_meters=120.5, relative_direction="LEFT")],
+            ),
+            Leg(
+                mode="SUBWAY", route_short_name="F", from_stop_name="Roosevelt Island", to_stop_name="Lex/63 St",
+                start_time_ms=300000, end_time_ms=900000, headsign="96 St",
+            ),
+        ],
+    )
+    monkeypatch.setattr(agent._otp, "plan_route", AsyncMock(return_value=[itinerary]))
+
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("plan_route", {"from_lat": 0, "from_lon": 0, "to_lat": 0, "to_lon": 0})
+        return _text_response("Walk down Main St, then board the F toward 96 St.")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+
+    await agent.respond("how do I get to Lex/63", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert "Main St" in tool_result_content
+    assert "96 St" in tool_result_content
