@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
@@ -189,3 +190,17 @@ app.mount("/proxy", realtime_proxy_app)
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# Serves the built frontend from the same origin as /chat and /proxy --
+# avoids CORS and a second hosting service entirely (MVP minimalism).
+# Registered last: FastAPI/Starlette matches routes in registration
+# order, so /chat, /proxy/*, and /health above all still take precedence
+# over this catch-all mount. Rebuild via `npm run build -- --outDir
+# ../backend/app/static --emptyOutDir` from frontend/ and recommit
+# whenever the frontend changes -- there's no Node toolchain in this
+# service's Railway build image, so the static output is a committed
+# artifact, not built on deploy.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")
