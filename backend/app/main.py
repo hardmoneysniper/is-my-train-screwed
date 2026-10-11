@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
+from app.otp_lifecycle import stop_otp_if_idle
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
 from collectors.bus_collector import run_forever
@@ -147,11 +148,26 @@ async def _run_bus_volume_check_loop(bus_collector_task: "asyncio.Task") -> None
         await asyncio.sleep(BUS_MARKER_CHECK_INTERVAL_S)
 
 
+OTP_IDLE_CHECK_INTERVAL_S = 60  # cheap no-op check (see stop_otp_if_idle's
+# own early-return) when otp hasn't been used yet or isn't idle long
+# enough -- fine to check this often.
+
+
+async def _run_otp_idle_check_loop():
+    while True:
+        try:
+            await stop_otp_if_idle()
+        except Exception:
+            logging.exception("otp idle-check failed")
+        await asyncio.sleep(OTP_IDLE_CHECK_INTERVAL_S)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     monitor_task = asyncio.create_task(_run_monitor_loop())
     bus_collector_task = asyncio.create_task(_run_bus_collector_loop())
     bus_volume_check_task = asyncio.create_task(_run_bus_volume_check_loop(bus_collector_task))
+    otp_idle_check_task = asyncio.create_task(_run_otp_idle_check_loop())
     # Mounting a sub-app (below) does not auto-trigger its own lifespan in
     # Starlette -- without driving it explicitly here, the proxy's
     # TripIndex (_trip_index) would stay None and every mounted
@@ -161,6 +177,7 @@ async def lifespan(app: FastAPI):
     monitor_task.cancel()
     bus_collector_task.cancel()
     bus_volume_check_task.cancel()
+    otp_idle_check_task.cancel()
     try:
         await monitor_task
     except asyncio.CancelledError:
@@ -171,6 +188,10 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await bus_volume_check_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await otp_idle_check_task
     except asyncio.CancelledError:
         pass
 

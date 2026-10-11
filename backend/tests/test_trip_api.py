@@ -14,6 +14,16 @@ def _reset_rate_limit():
     # the module-level rate-limit state too.
     reset_for_tests()
 
+
+@pytest.fixture(autouse=True)
+def _otp_always_awake():
+    # 2026-10-11: /trip/plan now gates on ensure_otp_awake() first. See
+    # the matching fixture in test_conversation_agent.py for why this is
+    # needed (otherwise a real network call would happen per test).
+    with patch("app.api.trip.ensure_otp_awake", new_callable=AsyncMock, return_value=True):
+        yield
+
+
 def test_plan_trip_returns_itineraries():
     fake_itinerary = Itinerary(
         duration_seconds=1800,
@@ -30,3 +40,14 @@ def test_plan_trip_returns_itineraries():
     assert response.status_code == 200
     body = response.json()
     assert body["itineraries"][0]["duration_seconds"] == 1800
+
+
+def test_plan_trip_returns_503_when_otp_not_awake():
+    with patch("app.api.trip.ensure_otp_awake", new_callable=AsyncMock, return_value=False), \
+         patch("app.api.trip.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan:
+        response = client.post("/trip/plan", json={
+            "from_lat": 40.7597, "from_lon": -73.9532,
+            "to_lat": 40.7644, "to_lon": -73.9656,
+        })
+    assert response.status_code == 503
+    mock_plan.assert_not_called()

@@ -24,6 +24,17 @@ class Settings(BaseSettings):
     # (Task 10 brief).
     port: int = 8000
     geoclient_api_key: str = ""
+    # Lets backend wake/stop the otp service on demand (app/otp_lifecycle.py,
+    # 2026-10-11) via Railway's GraphQL API -- reuses the same personal
+    # account token already used for this project's deploy/ops tooling
+    # (user's explicit choice: simplicity over minting a narrower
+    # project-scoped token, see CLAUDE.md's cost-incident notes for the
+    # tradeoff). Empty locally/in tests -- otp_lifecycle's own calls are
+    # mocked there, never real.
+    railway_api_token: str = ""
+    railway_project_id: str = "77096939-d30b-46a4-b439-c545aff3fe25"
+    railway_otp_service_id: str = "7f4331b7-88ed-4688-8c76-b4c957017e1c"
+    railway_environment_id: str = "95c28f31-9ee7-465f-9046-034215422795"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

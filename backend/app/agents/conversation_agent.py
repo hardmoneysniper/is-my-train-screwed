@@ -14,6 +14,7 @@ from app.agents.tools import (
     PLAN_ROUTE_TOOL,
 )
 from app.geocode import geocode_address
+from app.otp_lifecycle import ensure_otp_awake
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
 from app import deadline, monitoring, risk_engine
@@ -245,9 +246,14 @@ class ConversationAgent:
             tool_results = []
             for tool_use in tool_uses:
                 if tool_use.name == "plan_route":
-                    itineraries = await self._otp.plan_route(**tool_use.input)
-                    last_itineraries = itineraries
-                    content = json.dumps([it.model_dump() for it in itineraries])
+                    if await ensure_otp_awake():
+                        itineraries = await self._otp.plan_route(**tool_use.input)
+                        last_itineraries = itineraries
+                        content = json.dumps([it.model_dump() for it in itineraries])
+                    else:
+                        content = json.dumps({
+                            "error": "the routing engine is still starting up, ask the user to try again in a few seconds"
+                        })
                 elif tool_use.name == "get_risk":
                     content = self._handle_get_risk(tool_use.input, last_itineraries)
                 elif tool_use.name == "find_stop":

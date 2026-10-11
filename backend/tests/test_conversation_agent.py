@@ -9,6 +9,19 @@ from app.models.transit import Itinerary, Leg, WalkStep
 from app.models.risk import TransferRisk
 
 
+@pytest.fixture(autouse=True)
+def _otp_always_awake():
+    # 2026-10-11: plan_route dispatch now gates on ensure_otp_awake()
+    # first (otp_lifecycle.py's on-demand wake/sleep). Every existing
+    # test in this file exercises the "otp already up" path -- without
+    # this, each would instead make a real network call (first to a
+    # nonexistent localhost OTP, then to Railway's real API with an
+    # empty token). The one test that needs the "still starting up"
+    # path overrides this patch itself.
+    with patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock, return_value=True):
+        yield
+
+
 def _fake_itinerary():
     return Itinerary(
         duration_seconds=1800,
@@ -113,6 +126,38 @@ async def test_respond_calls_plan_route_tool_and_narrates_result():
     call_kwargs = mock_client.messages.create.call_args_list[0].kwargs
     assert call_kwargs["system"][-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in call_kwargs["tools"][0]
+
+
+@pytest.mark.asyncio
+async def test_plan_route_tells_user_otp_is_still_starting_when_not_awake():
+    # ensure_otp_awake() returning False (still cold-starting, see
+    # otp_lifecycle.py) must never fall through to a real plan_route
+    # call or fabricate an itinerary -- the tool result itself carries
+    # an honest "still starting" error for the model to narrate.
+    fake_tool_use_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    fake_final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="The routing engine is starting up — try again shortly.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock, return_value=False), \
+         patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(side_effect=[fake_tool_use_response, fake_final_response])
+
+        agent = ConversationAgent()
+        await agent.respond("How do I get from Roosevelt Island to Lex/63?", conversation_history=[], anonymous_id="anon-1")
+
+    mock_plan.assert_not_called()  # never calls the real OTP client when not awake
+    tool_result_content = mock_client.messages.create.call_args_list[1].kwargs["messages"][-1]["content"][0]["content"]
+    assert "starting up" in tool_result_content
 
 
 @pytest.mark.asyncio
