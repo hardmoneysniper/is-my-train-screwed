@@ -1,9 +1,18 @@
 from unittest.mock import patch, AsyncMock
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.models.transit import Itinerary, Leg
+from app.rate_limit import reset_for_tests
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    # Same rationale as test_chat_api.py's fixture -- /trip/plan shares
+    # the module-level rate-limit state too.
+    reset_for_tests()
 
 def test_plan_trip_returns_itineraries():
     fake_itinerary = Itinerary(

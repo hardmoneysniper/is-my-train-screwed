@@ -1,8 +1,19 @@
 from unittest.mock import patch, AsyncMock
+import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.rate_limit import reset_for_tests
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    # Module-level rate-limit state would otherwise leak across every
+    # test in this file (all posting to /chat through the same
+    # TestClient/IP) -- without this, late tests could start getting
+    # real 429s purely from earlier tests' request counts.
+    reset_for_tests()
 
 
 def test_chat_returns_reply_with_empty_history():
