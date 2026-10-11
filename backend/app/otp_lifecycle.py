@@ -10,13 +10,15 @@ This is a small, explicit replacement: call ensure_otp_awake() before
 any OTP call, mark_otp_used() after a successful one, and run
 stop_otp_if_idle() periodically from main.py's lifespan.
 
-Measured cold-start timing (2026-10-11, real test against this exact
-service): ~21-31s from triggering a restart to OTP serving a real,
-graph-loaded routing query. ENSURE_AWAKE_MAX_WAIT_SECONDS is kept under
-the ~30s a browser/proxy commonly allows before timing out a request, so
-a caller that waits inline never risks hitting that ceiling itself --
-if OTP isn't ready within the budget, callers get an honest "still
-starting" signal instead of hanging past it.
+Measured cold-start timing: an isolated test (2026-10-11, stop + restart
++ poll, no LLM/HTTP overhead) showed ~21-31s from triggering a restart
+to OTP serving a real, graph-loaded routing query. A live end-to-end
+test through the actual /chat endpoint (same day, real cold start, zero
+manual intervention) took 30s from the wake trigger to OTP responding
+-- succeeded, but right at the edge of a 25s poll budget. Since that
+same test also proved the platform tolerates a 33s+ total request
+with no gateway timeout, the budget below has real margin above the
+measured worst case rather than sitting flush against it.
 """
 import asyncio
 import time
@@ -27,7 +29,7 @@ from app.config import settings
 
 RAILWAY_GRAPHQL_URL = "https://backboard.railway.app/graphql/v2"
 
-ENSURE_AWAKE_MAX_WAIT_SECONDS = 25
+ENSURE_AWAKE_MAX_WAIT_SECONDS = 40
 ENSURE_AWAKE_POLL_INTERVAL_SECONDS = 3
 IDLE_STOP_AFTER_SECONDS = 10 * 60  # 2026-10-11 (user): sleep when unused
 

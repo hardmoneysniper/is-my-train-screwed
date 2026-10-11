@@ -52,14 +52,20 @@ async def test_ensure_otp_awake_wakes_and_waits_until_reachable():
 
 @pytest.mark.asyncio
 async def test_ensure_otp_awake_returns_false_when_still_down_after_budget():
+    # A fake clock that advances by 10s on every monotonic() call, forever
+    # -- independent of exactly how many calls ensure_otp_awake() makes or
+    # what ENSURE_AWAKE_MAX_WAIT_SECONDS is currently set to, this must
+    # eventually exceed the budget and the loop must stop rather than spin.
+    fake_now = [0.0]
+
+    def _advancing_clock():
+        fake_now[0] += 10.0
+        return fake_now[0]
+
     with patch("app.otp_lifecycle.is_otp_reachable", new_callable=AsyncMock, return_value=False), \
          patch("app.otp_lifecycle.wake_otp", new_callable=AsyncMock), \
          patch("asyncio.sleep", new_callable=AsyncMock), \
-         patch("time.monotonic", side_effect=[0.0, 0.0, 10.0, 26.0]):
-        # First two monotonic() calls are the "already reachable?" fast
-        # path (no -- not used) and the deadline computation; the loop's
-        # own monotonic() < deadline checks then see 10.0 (still within
-        # budget, one more poll) then 26.0 (past the 25s budget -- stop).
+         patch("time.monotonic", side_effect=_advancing_clock):
         assert await otp_lifecycle.ensure_otp_awake() is False
 
 
