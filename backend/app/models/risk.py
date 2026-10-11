@@ -47,10 +47,11 @@ class ReliabilityBucket(BaseModel):
     hour_bucket: int
     stat_type: Literal["headway", "delay", "prediction_error"]
     histogram: dict
-    # float, not int: Task 5's nightly decay (0.95*old + 0.05*today) applied
-    # to n the same way as the histogram makes these genuinely fractional
-    # after the first fold (e.g. 0.95), so a strict int field would raise
-    # ValidationError on real decayed rows.
+    # float, not int: SQLite's INT column type doesn't enforce the Python
+    # type back out, and histogram["counts"] entries are floats by
+    # construction (bin accumulation uses += 1.0) -- kept float for
+    # consistency with those, though a cumulative sum of integer event
+    # counts is always whole-valued in practice.
     n_observations: float
     n_ambiguous: float
     window_start: date

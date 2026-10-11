@@ -58,9 +58,16 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 
 MIN_N_OBSERVATIONS = 200
 MONTE_CARLO_DRAWS = 1000
-# Steady-state horizon of Task 5's decay recurrence (1 / (1 - 0.95) = 20):
-# a bucket's effective sample never "remembers" more than this many days
-# regardless of how long collection has run (task-6-brief.md step 6).
+# Freshness cap for citations (task-6-brief.md step 6): a transfer-risk
+# citation never claims to reflect more than this many days of history,
+# even once real collection has run far longer -- transit patterns and
+# schedules can shift, so capping claimed recency is a deliberate
+# honesty choice, independent of how n_observations itself is computed.
+# (Originally derived from the aggregator's now-removed decay formula's
+# memory horizon, 1 / (1 - 0.95) = 20 -- that formula is gone (2026-10-11,
+# see aggregate_reliability_buckets.py's module docstring), but 20 days
+# remains a reasonable freshness cap on its own terms, so the value is
+# kept, just no longer tied to decay math.)
 MAX_WINDOW_DAYS = 20
 
 _MODE_TO_AGENCY = {

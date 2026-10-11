@@ -1,9 +1,23 @@
 """backend/scripts/aggregate_reliability_buckets.py
 
 Nightly fold of `arrival_events` into `reliability_buckets` (spec §5.2),
-with exponential decay across days: `hist = 0.95*hist + 0.05*today`, `n`
-decayed the same way. See task-5-brief.md for the binding design
-decisions this implements -- in short:
+with a true cumulative sum across days: `hist += today`, `n` summed the
+same way. See task-5-brief.md for the binding design decisions this
+implements -- in short:
+
+Originally this folded with exponential decay (`0.95*old + 0.05*new`).
+Fixed 2026-10-11: that formula's steady-state magnitude converges to
+roughly one day's raw observation count (0.05 / (1 - 0.95) = 1), capping
+every bucket's `n_observations` in the single digits to ~20 regardless
+of how many days of real history had been collected -- confirmed
+directly against 90 days of real subway/bus data, max n_observations
+18.9. Since `risk_engine.py`'s `MIN_N_OBSERVATIONS = 200` compares
+directly against this value, the empirical-risk citation (and the
+bus-corridor data-gate for airport mode) could never fire for ANY
+bucket, no matter how long collection ran -- not a missing-data problem,
+a magnitude-ceiling problem in the fold formula itself. A true
+cumulative sum has no such ceiling: it grows with real history, which is
+what `MIN_N_OBSERVATIONS` always assumed it would do.
 
 - "Yesterday" means every `(agency, service_date)` in `arrival_events`
   not yet in the new `processed_days` bookkeeping table (handles both the
@@ -17,10 +31,10 @@ decisions this implements -- in short:
 - Prediction-error excludes ambiguous-derivation-quality observations
   from the histogram/`n_observations` entirely, but still counts them in
   `n_ambiguous` for provenance (spec-sanctioned choice, see the brief).
-- A bucket with no prior row is inserted as-is (no decay against an empty
-  prior). An existing bucket is decayed element-wise across its full
-  histogram array, `window_start` left untouched (it's a fixed anchor,
-  not a moving window).
+- A bucket with no prior row is inserted as-is. An existing bucket has
+  today's counts added element-wise across its full histogram array,
+  `window_start` left untouched (it's a fixed anchor, not a moving
+  window).
 - A whole day's bucket upserts + its `processed_days` insert happen in
   one transaction, so a mid-fold crash never half-marks a day as done.
 
@@ -33,9 +47,6 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 
 from db import get_connection
-
-DECAY_OLD = 0.95
-DECAY_NEW = 0.05
 
 # stat_type -> fixed-width histogram shape (task-5-brief.md step 5). The
 # last bin index doubles as the clip bucket for values >= the top edge;
@@ -198,7 +209,7 @@ def _upsert_bucket(
     else:
         old_histogram = json.loads(existing["histogram"])
         new_counts = [
-            DECAY_OLD * old_c + DECAY_NEW * new_c
+            old_c + new_c
             for old_c, new_c in zip(old_histogram["counts"], today_entry["counts"])
         ]
         histogram = {
@@ -206,13 +217,13 @@ def _upsert_bucket(
             "min_s": cfg["min_s"],
             "counts": new_counts,
         }
-        n_observations = DECAY_OLD * existing["n_observations"] + DECAY_NEW * today_entry["n_observations"]
-        n_ambiguous = DECAY_OLD * existing["n_ambiguous"] + DECAY_NEW * today_entry["n_ambiguous"]
+        n_observations = existing["n_observations"] + today_entry["n_observations"]
+        n_ambiguous = existing["n_ambiguous"] + today_entry["n_ambiguous"]
         window_start = existing["window_start"]  # fixed anchor -- never moved
         created = False
 
     # Real upsert-by-key (Task 1 built the UNIQUE index this relies on).
-    # The merge math above already accounts for decay vs. fresh-insert, so
+    # The merge math above already accounts for sum vs. fresh-insert, so
     # DO UPDATE SET just writes the precomputed final values -- crucially
     # it does NOT touch window_start, leaving it at its original value.
     conn.execute(

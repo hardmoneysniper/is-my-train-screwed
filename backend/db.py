@@ -70,16 +70,16 @@ CREATE TABLE IF NOT EXISTS reliability_buckets (
 );
 
 -- One row per bucket: Task 6 reads by this exact 7-tuple, Task 5's
--- nightly job upserts by this exact 7-tuple (decay formula, in place).
+-- nightly job upserts by this exact 7-tuple (cumulative-sum fold, in place).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_reliability_buckets_key
     ON reliability_buckets (
         agency, route_id, stop_id, direction, day_type, hour_bucket, stat_type
     );
 
 -- Task 5 bookkeeping: which (agency, service_date) days have already been
--- folded into reliability_buckets. The decay formula is not idempotent --
--- folding the same day twice would double-apply it -- so a day is only
--- inserted here after its whole fold (all bucket upserts) commits.
+-- folded into reliability_buckets. The fold is not idempotent -- folding
+-- the same day twice would double-count it -- so a day is only inserted
+-- here after its whole fold (all bucket upserts) commits.
 CREATE TABLE IF NOT EXISTS processed_days (
     agency TEXT NOT NULL,
     service_date DATE NOT NULL,

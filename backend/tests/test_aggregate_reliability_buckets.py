@@ -101,7 +101,7 @@ def test_fresh_bucket_created_with_no_decay(conn):
     assert sum(bucket["histogram"]["counts"]) == 1.0
 
 
-def test_second_day_applies_decay_exactly(conn):
+def test_second_day_sums_with_existing_bucket(conn):
     # Day 1: one delay observation of 45s.
     _insert_event(conn, delay_seconds=45, service_date=SERVICE_DATE)
     run_aggregate(conn)
@@ -118,14 +118,16 @@ def test_second_day_applies_decay_exactly(conn):
     idx_45 = (45 - HIST_CONFIG["delay"]["min_s"]) // HIST_CONFIG["delay"]["bin_width_s"]
     idx_75 = (75 - HIST_CONFIG["delay"]["min_s"]) // HIST_CONFIG["delay"]["bin_width_s"]
 
-    assert bucket_after["n_observations"] == pytest.approx(0.95 * 1 + 0.05 * 1)
+    # True cumulative sum (fixed 2026-10-11 -- see module docstring): two
+    # real days of one observation each sum to 2, not a decayed ~1.0.
+    assert bucket_after["n_observations"] == 2
     assert bucket_after["window_start"] == SERVICE_DATE.isoformat()  # unchanged anchor
 
     if idx_45 == idx_75:
-        assert bucket_after["histogram"]["counts"][idx_45] == pytest.approx(0.95 * 1 + 0.05 * 1)
+        assert bucket_after["histogram"]["counts"][idx_45] == 2.0
     else:
-        assert bucket_after["histogram"]["counts"][idx_45] == pytest.approx(0.95 * 1 + 0.05 * 0)
-        assert bucket_after["histogram"]["counts"][idx_75] == pytest.approx(0.95 * 0 + 0.05 * 1)
+        assert bucket_after["histogram"]["counts"][idx_45] == 1.0
+        assert bucket_after["histogram"]["counts"][idx_75] == 1.0
 
 
 def test_headway_assigned_to_later_events_hour_bucket(conn):
@@ -217,7 +219,7 @@ def test_rerunning_already_processed_day_is_a_noop(conn):
 
     # Re-run with no new data: (subway, SERVICE_DATE) is already in
     # processed_days, so find_unprocessed_days must skip it entirely --
-    # the bucket must not be decayed a second time against itself.
+    # the bucket must not be summed a second time against itself.
     run_aggregate(conn)
 
     bucket_second = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
@@ -361,20 +363,17 @@ def test_backlog_of_multiple_unprocessed_days_all_get_folded(conn):
     assert processed == {day1.isoformat(), day2.isoformat()}
 
     bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
-    # day1 creates the bucket fresh, day2 decays it in the same run.
-    assert bucket["n_observations"] == pytest.approx(0.95 * 1 + 0.05 * 1)
+    # day1 creates the bucket fresh, day2 sums into it in the same run.
+    assert bucket["n_observations"] == 2
 
 
-def test_decayed_row_round_trips_through_reliability_bucket_model(conn):
-    # Regression test for a latent bug: ReliabilityBucket.n_observations /
-    # n_ambiguous used to be typed `int`, but the decay formula
-    # (0.95*old + 0.05*today) produces genuinely fractional values as soon
-    # as two days for the same key contribute different counts -- a
-    # strict-int Pydantic field raises ValidationError on that row, which
-    # would have surfaced as a latent crash in Task 6's get_risk. Day 1
-    # contributes 1 observation, day 2 contributes 3 for the SAME key, so
-    # the decayed n_observations is 0.95*1 + 0.05*3 = 1.1 -- not an
-    # integer, and not coincidentally so.
+def test_multi_day_summed_row_round_trips_through_reliability_bucket_model(conn):
+    # Regression coverage for the model round-trip, updated 2026-10-11
+    # when the aggregator switched from decay to a true cumulative sum
+    # (see module docstring): a multi-day fold must still produce a row
+    # ReliabilityBucket.model_validate accepts cleanly. Day 1 contributes
+    # 1 observation, day 2 contributes 3 for the SAME key -- summed, not
+    # decayed, so n_observations is exactly 4.
     day1 = date(2026, 8, 24)
     day2 = date(2026, 8, 25)
     _insert_event(conn, delay_seconds=45, service_date=day1, vehicle_id="F_1")
@@ -384,10 +383,9 @@ def test_decayed_row_round_trips_through_reliability_bucket_model(conn):
     run_aggregate(conn)
 
     bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
-    assert bucket["n_observations"] == pytest.approx(0.95 * 1 + 0.05 * 3)
-    assert bucket["n_observations"] != int(bucket["n_observations"])  # genuinely fractional
+    assert bucket["n_observations"] == 4
 
     row_dict = dict(bucket)  # already has histogram as a decoded dict, matching model shape
     validated = ReliabilityBucket.model_validate(row_dict)
-    assert validated.n_observations == pytest.approx(1.1)
-    assert validated.n_ambiguous == pytest.approx(0.0)
+    assert validated.n_observations == 4
+    assert validated.n_ambiguous == 0

@@ -48,11 +48,11 @@ def _p85_seconds(histogram: dict) -> float:
     bin_width_s = histogram["bin_width_s"]
     min_s = histogram["min_s"]
     total = sum(counts)  # exactly equals the bucket's n_observations by
-                          # construction -- the aggregator decays histogram
-                          # counts and n_observations with identical
-                          # DECAY_OLD/DECAY_NEW weights from identical
-                          # starting values (verified directly against
-                          # aggregate_reliability_buckets.py's _upsert_bucket)
+                          # construction -- the aggregator sums histogram
+                          # counts and n_observations identically from
+                          # identical starting values (verified directly
+                          # against aggregate_reliability_buckets.py's
+                          # _upsert_bucket)
     threshold = 0.85 * total
     cumulative = 0.0
     for i, c in enumerate(counts):
