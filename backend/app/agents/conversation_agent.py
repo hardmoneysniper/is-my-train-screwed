@@ -29,7 +29,13 @@ CITATION_FOOTER_TEMPLATE = "*Based on {n} observed patterns in the last {window_
 SYSTEM_PROMPT = (
     "You are a NYC transit trip advisor. You never invent routes, durations, "
     "or probabilities — always call plan_route and narrate its exact result. "
-    "After planning a route, call get_risk to check its transfers. If it "
+    "After planning a route, call get_risk to check its transfers. Set its "
+    "user_in_a_rush input to true only if THIS conversation signals real "
+    "urgency for THIS trip right now — a stated deadline, 'I'm late', "
+    "'I need to hurry', a flight/appointment they're tight on time for — "
+    "the same signal that later decides whether to offer monitoring, not "
+    "the time of day; default it to false (omit it) when nothing in the "
+    "conversation signals urgency. If it "
     "returns an empty list, there's no transfer to discuss. If it returns "
     "entries, narrate each using its exact p_miss/n/window_days; if an "
     "entry's quality is 'insufficient', say reliability data isn't "
@@ -193,7 +199,8 @@ class ConversationAgent:
         if not (0 <= itinerary_index < len(last_itineraries)):
             return json.dumps({"error": "no itinerary available yet — call plan_route first"})
         itinerary = last_itineraries[itinerary_index]
-        risks = risk_engine.get_risk(itinerary)
+        is_rush = bool(tool_input.get("user_in_a_rush", False))
+        risks = risk_engine.get_risk(itinerary, is_rush=is_rush)
         return json.dumps([r.model_dump() for r in risks])
 
     def _handle_create_monitored_trip(

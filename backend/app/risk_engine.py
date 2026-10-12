@@ -252,19 +252,24 @@ def _typical_wait_seconds(outgoing_histogram: dict) -> float:
     return sum(m * w for m, w in zip(midpoints, weights)) / sum(weights)
 
 
-# 2026-10-12 (user): rush vs. non-rush reroute-offer thresholds -- waiting
-# over ~7-8 minutes during rush, or ~15 minutes off-peak, starts
-# meaningfully affecting a real trip. A plain policy choice, not derived
-# from data, same spirit as MAX_WINDOW_DAYS above. RUSH_HOURS is a
-# standard NYC AM/PM rush approximation (7-9am, 4-7pm), used only to pick
-# which threshold applies -- also a policy choice, not a measured cutoff.
-RUSH_HOURS = {7, 8, 9, 16, 17, 18, 19}
+# 2026-10-12 (user, corrected same day): the reroute-offer threshold is
+# about whether THIS USER is in a hurry, not whether the wall clock says
+# "rush hour" -- a rider with no deadline traveling at 8am can wait 15
+# minutes just fine; a rider racing for a flight at 2pm can't wait 7.
+# Originally wired to hour-of-day (RUSH_HOURS), which conflated "when
+# most people are commuting" with "how much urgency THIS trip has" --
+# wrong, scrapped the same day it shipped. Now takes an explicit
+# is_rush signal from the caller (the Conversation Agent reads real
+# conversational urgency cues -- a deadline, "I'm late," a flight -- the
+# same signal that already drives the existing monitoring-offer logic;
+# the Re-plan Agent derives it automatically from whether the trip has a
+# real deadline_ts, no LLM call needed there). Thresholds themselves are
+# unchanged, still a plain policy choice, not derived from data.
 RUSH_WAIT_THRESHOLD_SECONDS = 7.5 * 60
 NONRUSH_WAIT_THRESHOLD_SECONDS = 15 * 60
 
 
-def _wait_threshold_seconds(day_type: str, hour_bucket: int) -> float:
-    is_rush = day_type == "weekday" and hour_bucket in RUSH_HOURS
+def _wait_threshold_seconds(is_rush: bool) -> float:
     return RUSH_WAIT_THRESHOLD_SECONDS if is_rush else NONRUSH_WAIT_THRESHOLD_SECONDS
 
 
@@ -306,6 +311,7 @@ def _compute_transfer_risk(
     day_type: str,
     hour_bucket: int,
     buffer_seconds: float,
+    is_rush: bool,
 ) -> tuple[float | None, float, int, str, float | None, bool]:
     # Precompute lookup slot (deferred -- see docs/superpowers/plans/2026-08-27-phase-2-risk-engine-plan.md
     # Task 6 and README.md's "Known deferrals"). Not built yet: no 30+ days of real
@@ -352,12 +358,12 @@ def _compute_transfer_risk(
         outgoing_histogram = json.loads(outgoing["histogram"])
         if sum(outgoing_histogram["counts"]) > 0:
             typical_wait_seconds = _typical_wait_seconds(outgoing_histogram)
-            should_offer_reroute = typical_wait_seconds > _wait_threshold_seconds(day_type, hour_bucket)
+            should_offer_reroute = typical_wait_seconds > _wait_threshold_seconds(is_rush)
 
     return p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute
 
 
-def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, route_index: RouteIndex) -> TransferRisk:
+def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, route_index: RouteIndex, is_rush: bool) -> TransferRisk:
     from_route = leg_i.route_short_name or ""
     to_route = leg_j.route_short_name or ""
     transfer_stop_name = leg_j.from_stop_name
@@ -385,7 +391,7 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
 
     p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute = _compute_transfer_risk(
         conn, agency_i, route_id_i, stop_id_i, agency_j, route_id_j, stop_id_j,
-        day_type, hour_bucket, buffer_seconds,
+        day_type, hour_bucket, buffer_seconds, is_rush,
     )
     return TransferRisk(
         from_route=from_route,
@@ -404,6 +410,7 @@ def get_risk(
     itinerary: Itinerary,
     conn: sqlite3.Connection | None = None,
     route_index: RouteIndex | None = None,
+    is_rush: bool = False,
 ) -> list[TransferRisk]:
     """Pure function, no LLM calls. Returns one `TransferRisk` per transfer
     point in `itinerary`, in itinerary order -- `[]` for a single-leg or
@@ -412,7 +419,9 @@ def get_risk(
     from the real static GTFS zips. Both are overridable so tests can
     inject a `tmp_path` DB and a small synthetic `RouteIndex` instead of
     the real ~150MB GTFS files (matches Tasks 1/3/4/5's testing
-    convention)."""
+    convention). `is_rush` (2026-10-12, user) is the caller's real-world
+    urgency signal for THIS trip -- not derived from the wall clock here,
+    see _wait_threshold_seconds's docstring for why hour-of-day was wrong."""
     owns_conn = conn is None
     if owns_conn:
         conn = get_connection()
@@ -421,7 +430,7 @@ def get_risk(
     try:
         transit_legs = [leg for leg in itinerary.legs if leg.mode != "WALK"]
         return [
-            _transfer_risk_for_pair(conn, leg_i, leg_j, route_index)
+            _transfer_risk_for_pair(conn, leg_i, leg_j, route_index, is_rush)
             for leg_i, leg_j in zip(transit_legs, transit_legs[1:])
         ]
     finally:

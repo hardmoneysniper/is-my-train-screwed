@@ -488,33 +488,8 @@ def test_low_n_bucket_returns_insufficient(conn, route_index):
     assert r.should_offer_reroute is False
 
 
-def test_should_offer_reroute_true_when_typical_wait_exceeds_rush_threshold(conn, route_index):
-    _insert_bucket(
-        conn,
-        agency="subway",
-        route_id="F",
-        stop_id="127N",
-        day_type="weekday",
-        hour_bucket=8,  # a real RUSH_HOURS member
-        stat_type="delay",
-        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}),
-        n_observations=200,
-    )
-    # Headway bin i=20 (min_s=0, bin_width=30) -> midpoint 615s (10.25
-    # min), well past RUSH_WAIT_THRESHOLD_SECONDS (7.5 min).
-    _insert_bucket(
-        conn,
-        agency="subway",
-        route_id="Q",
-        stop_id="127S",
-        day_type="weekday",
-        hour_bucket=8,
-        stat_type="headway",
-        histogram=json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 20 else 0.0 for i in range(81)]}),
-        n_observations=200,
-    )
-
-    itinerary = Itinerary(
+def _two_leg_itinerary_for_reroute_test():
+    return Itinerary(
         duration_seconds=900,
         legs=[
             Leg(
@@ -540,12 +515,58 @@ def test_should_offer_reroute_true_when_typical_wait_exceeds_rush_threshold(conn
         ],
     )
 
-    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+def _insert_reroute_test_buckets(conn):
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}),
+        n_observations=200,
+    )
+    # Headway bin i=20 (min_s=0, bin_width=30) -> midpoint 615s (10.25
+    # min) -- past RUSH_WAIT_THRESHOLD_SECONDS (7.5 min) but under
+    # NONRUSH_WAIT_THRESHOLD_SECONDS (15 min).
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 20 else 0.0 for i in range(81)]}),
+        n_observations=200,
+    )
+
+
+def test_should_offer_reroute_true_when_user_in_a_rush_and_wait_exceeds_rush_threshold(conn, route_index):
+    _insert_reroute_test_buckets(conn)
+    results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index, is_rush=True)
 
     assert len(results) == 1
     r = results[0]
     assert r.typical_wait_seconds == 615.0
     assert r.should_offer_reroute is True
+
+
+def test_should_offer_reroute_false_when_user_not_in_a_rush_even_at_the_same_hour(conn, route_index):
+    # 2026-10-12 (user): the exact same transfer, SAME hour_bucket=8 (a
+    # real rush hour), SAME 615s wait -- the only thing that changed is
+    # is_rush. Proves the decision is about the user's stated urgency, not
+    # the wall clock: a rider not in a rush at 8am still gets the more
+    # patient 15-min bar, where 615s doesn't clear it.
+    _insert_reroute_test_buckets(conn)
+    results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index, is_rush=False)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.typical_wait_seconds == 615.0
+    assert r.should_offer_reroute is False
 
 
 # --- ambiguous route_short_name (Gap 2) ----------------------------------
@@ -650,11 +671,9 @@ def test_typical_wait_seconds_is_weighted_mean_of_headway_histogram():
     assert risk_engine._typical_wait_seconds(outgoing_histogram) == 135.0
 
 
-def test_wait_threshold_seconds_rush_vs_nonrush():
-    assert risk_engine._wait_threshold_seconds("weekday", 8) == risk_engine.RUSH_WAIT_THRESHOLD_SECONDS
-    assert risk_engine._wait_threshold_seconds("weekday", 13) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
-    # Weekend never counts as rush, even at a rush-hour-shaped hour_bucket.
-    assert risk_engine._wait_threshold_seconds("weekend", 8) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
+def test_wait_threshold_seconds_reflects_user_urgency_not_the_clock():
+    assert risk_engine._wait_threshold_seconds(is_rush=True) == risk_engine.RUSH_WAIT_THRESHOLD_SECONDS
+    assert risk_engine._wait_threshold_seconds(is_rush=False) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
 
 
 # --- Gap 3 (bus direction) fallback: direction-agnostic combination ------

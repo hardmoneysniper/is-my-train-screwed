@@ -414,6 +414,54 @@ async def test_deadline_mode_recomputes_against_new_itinerary(conn, route_index)
     assert _expected_clock(expected_old_depart_by) not in result
 
 
+# --- is_rush wiring (2026-10-12, user): derived from the trip's real -----
+# deadline_ts, no LLM call, Re-plan stays template-only -------------------
+
+
+@pytest.mark.asyncio
+async def test_replan_passes_is_rush_true_when_trip_has_a_real_deadline(conn, route_index):
+    old_itinerary = Itinerary(
+        duration_seconds=600,
+        legs=[_subway_leg("F", "A1", "A3", "Roosevelt Island", "Lex/63",
+                           _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 10))],
+    )
+    trip = _create_trip(conn, old_itinerary, deadline_ts=_local_ms(2026, 8, 24, 10, 0))
+    new_itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[_subway_leg("Q", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                           _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 15))],
+    )
+
+    with patch("app.agents.replan_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.replan_agent.risk_engine.get_risk", return_value=[]) as mock_get_risk:
+        mock_plan.return_value = [new_itinerary]
+        await replan_trip(trip, "alert", conn=conn)
+
+    mock_get_risk.assert_called_once_with(new_itinerary, conn=conn, is_rush=True)
+
+
+@pytest.mark.asyncio
+async def test_replan_passes_is_rush_false_when_trip_has_no_deadline(conn, route_index):
+    old_itinerary = Itinerary(
+        duration_seconds=600,
+        legs=[_subway_leg("F", "A1", "A3", "Roosevelt Island", "Lex/63",
+                           _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 10))],
+    )
+    trip = _create_trip(conn, old_itinerary)  # no deadline_ts
+    new_itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[_subway_leg("Q", "A1", "A2", "Roosevelt Island", "Transfer Stop",
+                           _local_ms(2026, 8, 24, 8, 0), _local_ms(2026, 8, 24, 8, 15))],
+    )
+
+    with patch("app.agents.replan_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.replan_agent.risk_engine.get_risk", return_value=[]) as mock_get_risk:
+        mock_plan.return_value = [new_itinerary]
+        await replan_trip(trip, "alert", conn=conn)
+
+    mock_get_risk.assert_called_once_with(new_itinerary, conn=conn, is_rush=False)
+
+
 # --- Test 4: no real change -- snapshot updates, no notification ---------
 
 

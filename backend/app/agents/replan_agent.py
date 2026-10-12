@@ -225,7 +225,11 @@ async def replan_trip(trip: MonitoredTrip, trigger_reason: str, conn: sqlite3.Co
             return None
         new_itinerary = itineraries[0]
 
-        new_risks = risk_engine.get_risk(new_itinerary, conn=conn)
+        # 2026-10-12 (user): is_rush reflects real urgency for THIS trip,
+        # not the wall clock -- a monitored trip with a real stated
+        # deadline is a real urgency signal, derived here with no LLM call
+        # (Re-plan stays template-only by design).
+        new_risks = risk_engine.get_risk(new_itinerary, conn=conn, is_rush=trip.deadline_ts is not None)
 
         route_changed = _route_signature(trip.itinerary_snapshot) != _route_signature(new_itinerary)
 

@@ -48,6 +48,16 @@ GET_RISK_TOOL = {
                 "type": "integer",
                 "description": "Which itinerary from the most recent plan_route result to check (0 = first/default).",
             },
+            "user_in_a_rush": {
+                "type": "boolean",
+                "description": (
+                    "Whether THIS user has signaled real urgency for THIS trip right now — a stated "
+                    "deadline, 'I'm late', 'I need to hurry', a flight/appointment they're tight on time "
+                    "for. Not about the time of day — a rider with no deadline at 8am is not in a rush, "
+                    "and a rider racing for a flight at 2pm is. Defaults to false (not in a rush) when "
+                    "nothing in the conversation signals urgency — never guess this as true."
+                ),
+            },
         },
         "required": [],
     },
