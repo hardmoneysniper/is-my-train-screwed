@@ -586,7 +586,7 @@ def _late_night_bus_itinerary(incoming_mode: str, outgoing_mode: str):
 
 
 def test_late_night_bus_incoming_leg_is_never_cited_even_with_abundant_data(conn, route_index):
-    # A 2am transfer -- bus's own ANCHOR_HOUR=5 overnight boundary --
+    # A 2am transfer -- inside LATE_NIGHT_SUPPRESSED_HOURS ({2, 3}) --
     # with a real, abundant (n=200) incoming bucket present. Must still
     # read insufficient: "almost nobody rides a bus at 2am" (user), so
     # this is never cited regardless of how much data piles up.
@@ -649,6 +649,58 @@ def test_late_night_subway_is_unaffected(conn, route_index):
         n_observations=200,
     )
     results = get_risk(_late_night_bus_itinerary("SUBWAY", "SUBWAY"), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.p_miss is not None
+
+
+def test_4am_bus_leg_is_not_suppressed(conn, route_index):
+    # 2026-10-12 (user): "people start riding buses/subways at 4am to
+    # catch early flights and go to work" -- the suppression window is
+    # 2:00am-3:59am specifically, NOT the wider ANCHOR_HOUR=5 boundary.
+    # 4am must cite normally.
+    _insert_bucket(
+        conn,
+        agency="bus",
+        route_id="Q102",
+        stop_id="450154",
+        day_type="weekday",
+        hour_bucket=4,
+        stat_type="prediction_error",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="BUS",
+                route_short_name="Q102",
+                from_stop_id="MTABC:400000",
+                from_stop_name="Start",
+                to_stop_id="MTABC:450154",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 3, 50, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 4, 0, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 4, 5, 0),  # 4am local, weekday
+                end_time_ms=_local_ms(2026, 8, 24, 4, 15, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
 
     assert len(results) == 1
     r = results[0]

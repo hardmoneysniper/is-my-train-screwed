@@ -38,9 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app import bus_schedule_periods  # noqa: E402
 from app.day_type import day_type_for  # noqa: E402
-from app.risk_engine import MIN_N_OBSERVATIONS  # noqa: E402
+from app.risk_engine import LATE_NIGHT_SUPPRESSED_HOURS, MIN_N_OBSERVATIONS  # noqa: E402
 from collectors.bus_collector import CORRIDORS  # noqa: E402
 from db import get_connection  # noqa: E402
 from scripts.aggregate_reliability_buckets import run_aggregate  # noqa: E402
@@ -236,27 +235,34 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
     raw-record proxy for it. Call categorize_bus_data() first so this
     reflects the latest synced data.
 
-    Excludes hour_bucket < bus_schedule_periods.ANCHOR_HOUR (2026-10-12,
-    user: "almost nobody rides a bus at 2am thus almost nobody is using
-    our service" for it) -- risk_engine.py never cites these buckets
-    (see its _is_late_night_bus), so tracking "coverage" for them here
-    would just be noise that drags down a route's real completion
-    status over slots nobody will ever see a probability for."""
+    Excludes hour_bucket in risk_engine.LATE_NIGHT_SUPPRESSED_HOURS
+    (2026-10-12, user: "almost nobody rides a bus at 2am thus almost
+    nobody is using our service" for it) -- risk_engine.py never cites
+    these buckets (see its _is_late_night_bus), so tracking "coverage"
+    for them here would just be noise that drags down a route's real
+    completion status over slots nobody will ever see a probability
+    for. Approximate for bus: a stored hour_bucket is the period-mapped
+    (not literal) hour, so this excludes whichever PERIOD a suppressed
+    literal hour happens to land on -- coarse, but consistent with
+    every other policy choice in this file (same spirit as
+    PERIOD_MERGE_TOLERANCE), not worth a more precise literal-hour
+    reconstruction for a 2-hour window."""
     conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
+    exclude_placeholders = ",".join("?" for _ in LATE_NIGHT_SUPPRESSED_HOURS)
     try:
         coverage: dict[str, dict[str, tuple[int, int]]] = {}
         for route in CORRIDORS:
             coverage[route] = {}
             for day_type in ("weekday", "weekend"):
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT n_observations FROM reliability_buckets
                     WHERE agency = 'bus' AND route_id = ? AND day_type = ?
                       AND stat_type IN ('headway', 'prediction_error')
                       AND n_observations > 0
-                      AND hour_bucket >= ?
+                      AND hour_bucket NOT IN ({exclude_placeholders})
                     """,
-                    (route, day_type, bus_schedule_periods.ANCHOR_HOUR),
+                    (route, day_type, *LATE_NIGHT_SUPPRESSED_HOURS),
                 ).fetchall()
                 total = len(rows)
                 cleared = sum(1 for r in rows if r[0] >= MIN_N_OBSERVATIONS)

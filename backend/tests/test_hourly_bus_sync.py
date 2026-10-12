@@ -123,18 +123,20 @@ def test_real_bucket_coverage_measures_directly_against_reliability_buckets(tmp_
     assert coverage["Q70+"]["weekday"] == (1, 1)
 
 
-def test_real_bucket_coverage_excludes_late_night_hours(tmp_path):
-    # 2026-10-12 (user): risk_engine.py never cites a bus bucket before
-    # bus_schedule_periods.ANCHOR_HOUR ("almost nobody rides a bus at
-    # 2am") -- tracking coverage for it here would just be noise.
-    from app import bus_schedule_periods
+def test_real_bucket_coverage_excludes_the_2am_to_4am_window(tmp_path):
+    # 2026-10-12 (user): risk_engine.py never cites a bus bucket in the
+    # 2:00am-3:59am window ("almost nobody rides a bus at 2am") --
+    # tracking coverage for it here would just be noise. 4am itself
+    # (hour_bucket=4) must NOT be excluded -- "people start riding
+    # buses/subways at 4am to catch early flights and go to work."
     db_path = tmp_path / "local_pipeline.sqlite3"
     conn = get_connection(str(db_path))
     try:
-        # A real, abundant 2am bucket -- must not count toward coverage.
         _insert_bucket(conn, "M60+", "weekday", n_observations=200, stop_id="s1", hour_bucket=2)
-        # A real daytime bucket -- must count normally.
-        _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s2", hour_bucket=8)
+        _insert_bucket(conn, "M60+", "weekday", n_observations=200, stop_id="s2", hour_bucket=3)
+        # 4am and a normal daytime hour both count normally.
+        _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s3", hour_bucket=4)
+        _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s4", hour_bucket=8)
     finally:
         conn.close()
 
@@ -142,8 +144,7 @@ def test_real_bucket_coverage_excludes_late_night_hours(tmp_path):
          patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
         coverage = real_bucket_coverage()
 
-    assert coverage["M60+"]["weekday"] == (1, 1)
-    assert bus_schedule_periods.ANCHOR_HOUR == 5  # sanity-check the boundary this test relies on
+    assert coverage["M60+"]["weekday"] == (2, 2)
 
 
 def test_coverage_complete_is_false_for_a_corridor_with_no_real_buckets():

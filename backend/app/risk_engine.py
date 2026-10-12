@@ -60,16 +60,21 @@ LOCAL_TZ = ZoneInfo("America/New_York")
 MIN_N_OBSERVATIONS = 50
 
 # 2026-10-12 (user): "almost nobody rides a bus at 2am thus almost nobody
-# is using our service" for it -- bus citations are disabled for hours
-# before bus_schedule_periods.ANCHOR_HOUR (the same real, GTFS-derived
-# overnight-to-morning transition point that module already anchors its
-# own hour-clustering at, not a new separate threshold). Collection keeps
-# running for these hours regardless (the collector has no time-of-day
-# filter, and keeping the data is free) -- this only suppresses CITING
-# them, so a late-night bus leg always reads as quality="insufficient"/
-# typical_wait_seconds=None, same shape as any other no-data case, never
-# a fabricated low-confidence number. Subway is unaffected: it runs a
-# real, if reduced, overnight service with real riders, unlike a 2am bus.
+# is using our service" for it -- bus citations are disabled for a
+# narrow 2:00am-3:59am window specifically (NOT bus_schedule_periods'
+# wider ANCHOR_HOUR=5 boundary, which is about where that module's own
+# hour-CLUSTERING walk starts, a different concept). Deliberately
+# excludes 4am (user, same day): "people start riding buses/subways at
+# 4am to catch early flights and go to work" -- a real, separate rider
+# population this product must not silently stop serving. Collection
+# keeps running through this window regardless (the collector has no
+# time-of-day filter, and keeping the data is free) -- this only
+# suppresses CITING it, so a 2-4am bus leg always reads as
+# quality="insufficient"/typical_wait_seconds=None, same shape as any
+# other no-data case, never a fabricated low-confidence number. Subway
+# is unaffected: it runs a real, if reduced, overnight service with real
+# riders, unlike a 2am bus.
+LATE_NIGHT_SUPPRESSED_HOURS = frozenset({2, 3})
 # 2026-10-12 (user): lowered from 200. With p_miss now a single-
 # distribution exact calculation (not a compound two-distribution Monte
 # Carlo estimate), 200 real observations isn't needed for a defensible
@@ -292,7 +297,7 @@ def _incoming_stat_type(agency_i: str) -> str:
 
 
 def _is_late_night_bus(agency: str, hour: int) -> bool:
-    return agency == "bus" and hour < bus_schedule_periods.ANCHOR_HOUR
+    return agency == "bus" and hour in LATE_NIGHT_SUPPRESSED_HOURS
 
 
 def _compute_transfer_risk(
