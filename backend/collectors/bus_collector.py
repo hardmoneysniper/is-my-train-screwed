@@ -31,7 +31,7 @@ from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q90"]  # spec §2 seed set +
+CORRIDORS = ["Q102", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,

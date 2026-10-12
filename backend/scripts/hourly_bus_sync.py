@@ -60,39 +60,50 @@ REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
 # writes the stop marker to Railway once satisfied (main.py just watches
 # for that marker, see its own module comment).
 #
-# Per-route targets below are grounded in real observed stop_id counts
-# from several days of real local data (2026-10-01): Q70+=7, M60+=38,
-# Q102=32, Q3=79, B15=139, Q10=43, Q72=35, Q80=33, Q90=16. Per-day-type
-# target = distinct_stops * 24 hours * 200 (n-gate) * 1.5 (safety margin
-# -- real traffic isn't evenly spread across hours, so the slowest/
-# sparsest bucket takes noticeably longer than this average-case number
-# to reach n=200). A corridor with no entry here is treated as "not
-# ready" (see all_targets_met below), not skipped.
+# 2026-10-12 CORRECTION (user-directed re-derivation): the original
+# targets below (distinct_stops * 24h * 200 * 1.5) assumed raw 30s-poll
+# records convert into derived reliability_buckets observations at
+# roughly 1:1 (the "1.5" was meant as a safety margin on TOP of that).
+# That assumption was wrong, confirmed by real measurement: all 4 active
+# corridors (Q102 116%, Q72 106%, Q80 150%, Q90 101.5% of their OLD
+# weekend targets) genuinely "completed" by that metric, yet
+# reliability_buckets showed ZERO bus buckets anywhere -- weekday or
+# weekend -- crossing n>=200 (max observed n was 80). Precisely measured
+# the real conversion rate on Q90's single busiest real bucket (route
+# Q90, stop_id 505438, weekday hour 5): 365 raw records in that specific
+# (stop, hour) slice produced only 21 derived headway observations --
+# because only 14 distinct VEHICLES passed that stop in that hour across
+# ~15 weekdays of collection (most raw records are repeated predictions
+# for the SAME vehicle approaching, not new events). Real ratio: ~17.4
+# raw records per 1 unit of n_observations, not ~1.
 #
-# 2026-10-01 (user): per-route stopping, not all-or-nothing. Q70+/M60+
-# were already 2.6x-10.5x past target -- removed directly from CORRIDORS
-# in collectors/bus_collector.py (redeployed) rather than waiting for
-# every other corridor to also finish. That's now the standing pattern:
-# when a corridor's real cumulative local data clears its target with
-# margin, remove it from CORRIDORS and redeploy -- a route no longer in
-# CORRIDORS is simply no longer polled (run_forever()'s own route_id
-# filter), no runtime marker needed for a single route. The
-# BUS_COLLECTION_DONE_MARKER/all_targets_met mechanism below still
-# matters for the terminal case: once every corridor still in CORRIDORS
-# has individually been removed this way, CORRIDORS is empty,
-# all_targets_met() trivially passes, and this script writes the marker
-# so main.py cancels the collector task entirely rather than running an
-# idle poller.
+# Targets below are recomputed as distinct_stops * 24h * 200 (n-gate) *
+# 17.4 (the measured real ratio, replacing the old formula's implicit
+# ~1.5), using the same real stop counts as before (2026-10-01): Q70+=7,
+# M60+=38, Q102=32, Q3=79, B15=139, Q10=43, Q72=35, Q80=33, Q90=16. This
+# is still a rough, provisional correction, NOT independently re-measured
+# per route -- it applies Q90's one measured ratio uniformly, and Q90 is
+# a low-frequency route; a high-frequency trunk/SBS route (M60+, B15)
+# likely has a meaningfully better real ratio that this overstates, while
+# an even-lower-frequency stop/hour on some other route could understate
+# it. At these corrected magnitudes, full completion for the slowest
+# buckets is realistically months away, not weeks -- a genuinely open
+# question (same family as the subway MIN_N_OBSERVATIONS=200 discussion)
+# is whether bus should keep this per-hour bucket granularity and a
+# uniform n=200 threshold at all, or use broader time-of-day buckets /a
+# lower per-agency threshold instead. Not decided yet -- these numbers
+# are "keep collecting, don't re-trigger prematurely," not a validated
+# completion criterion.
 BUS_COLLECTION_TARGETS = {
-    "Q70+": {"weekday": 50_400, "weekend": 50_400},
-    "M60+": {"weekday": 273_600, "weekend": 273_600},
-    "Q102": {"weekday": 230_400, "weekend": 230_400},
-    "Q3": {"weekday": 568_800, "weekend": 568_800},
-    "B15": {"weekday": 1_000_800, "weekend": 1_000_800},
-    "Q10": {"weekday": 309_600, "weekend": 309_600},
-    "Q72": {"weekday": 252_000, "weekend": 252_000},
-    "Q80": {"weekday": 237_600, "weekend": 237_600},
-    "Q90": {"weekday": 115_200, "weekend": 115_200},
+    "Q70+": {"weekday": 584_640, "weekend": 584_640},
+    "M60+": {"weekday": 3_173_760, "weekend": 3_173_760},
+    "Q102": {"weekday": 2_672_640, "weekend": 2_672_640},
+    "Q3": {"weekday": 6_596_640, "weekend": 6_596_640},
+    "B15": {"weekday": 11_604_960, "weekend": 11_604_960},
+    "Q10": {"weekday": 3_590_640, "weekend": 3_590_640},
+    "Q72": {"weekday": 2_923_200, "weekend": 2_923_200},
+    "Q80": {"weekday": 2_756_160, "weekend": 2_756_160},
+    "Q90": {"weekday": 1_336_320, "weekend": 1_336_320},
 }
 
 
