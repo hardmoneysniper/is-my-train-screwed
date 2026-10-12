@@ -1,20 +1,41 @@
 """Tests for scripts/hourly_bus_sync.py's real logic: pull-then-delete
-safety ordering, append-vs-overwrite by file type, and the cumulative
-per-corridor target-check that decides when to stop collection. railway
-ssh itself is mocked -- not re-testing the CLI, testing that this script
-uses it correctly and never deletes before a local write is confirmed.
+safety ordering, append-vs-overwrite by file type, and the real-bucket-
+coverage check that decides when to stop collection (2026-10-12,
+replacing the retired raw-record-target approach -- see
+BUS_COLLECTION_TARGETS's module comment for why). railway ssh itself is
+mocked -- not re-testing the CLI, testing that this script uses it
+correctly and never deletes before a local write is confirmed.
 Recurrence and overlap protection are handled by Windows Task Scheduler
 (this script is one-shot, see its module docstring), not tested here."""
 import gzip
 import json
 from unittest.mock import patch
 
+from db import get_connection
 from scripts.hourly_bus_sync import (
-    all_targets_met,
     check_and_maybe_stop_collection,
+    coverage_complete,
     local_route_day_type_counts,
+    real_bucket_coverage,
     sync_once,
 )
+
+
+def _insert_bucket(conn, route_id, day_type, n_observations, stop_id="12345", hour_bucket=8, stat_type="headway"):
+    conn.execute(
+        """
+        INSERT INTO reliability_buckets (
+            agency, route_id, stop_id, direction, day_type, hour_bucket,
+            stat_type, histogram, n_observations, n_ambiguous, window_start,
+            last_updated
+        ) VALUES (
+            'bus', ?, ?, 'N', ?, ?, ?, '{"bin_width_s":30,"min_s":0,"counts":[]}',
+            ?, 0, '2026-08-14', '2026-10-12T00:00:00+00:00'
+        )
+        """,
+        (route_id, stop_id, day_type, hour_bucket, stat_type, n_observations),
+    )
+    conn.commit()
 
 
 def test_sync_once_appends_ndjson_but_overwrites_gz(tmp_path):
@@ -76,49 +97,80 @@ def test_local_route_day_type_counts_splits_weekday_and_weekend(tmp_path):
     assert counts["Q102"] == {"weekday": 0, "weekend": 1}
 
 
-def test_all_targets_met_is_false_for_a_corridor_with_no_target_entry():
-    counts = {"M60+": {"weekday": 999_999, "weekend": 999_999}, "Q3": {"weekday": 999_999, "weekend": 999_999}}
-    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q3"]), \
-         patch("scripts.hourly_bus_sync.BUS_COLLECTION_TARGETS", {"M60+": {"weekday": 100, "weekend": 100}}):
-        # Q3 has real data but no target entry -- must not count as "met".
-        assert all_targets_met(counts) is False
+def test_real_bucket_coverage_measures_directly_against_reliability_buckets(tmp_path):
+    db_path = tmp_path / "local_pipeline.sqlite3"
+    conn = get_connection(str(db_path))
+    try:
+        # M60+ weekday: 2 real buckets, 1 clears MIN_N_OBSERVATIONS (50).
+        _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s1")
+        _insert_bucket(conn, "M60+", "weekday", n_observations=10, stop_id="s2")
+        # M60+ weekend: zero real buckets at all.
+        # Q70+ weekday: only a prediction_error bucket (still counted --
+        # both stat_types are real candidate buckets).
+        _insert_bucket(conn, "Q70+", "weekday", n_observations=60, stop_id="s3", stat_type="prediction_error")
+        # A zero-n_observations row must be excluded from the denominator
+        # entirely (never-observed, not evidence either way).
+        _insert_bucket(conn, "Q70+", "weekday", n_observations=0, stop_id="s4")
+    finally:
+        conn.close()
+
+    with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q70+"]):
+        coverage = real_bucket_coverage()
+
+    assert coverage["M60+"]["weekday"] == (1, 2)
+    assert coverage["M60+"]["weekend"] == (0, 0)
+    assert coverage["Q70+"]["weekday"] == (1, 1)
 
 
-def test_all_targets_met_is_false_when_weekend_still_short():
-    counts = {"M60+": {"weekday": 300, "weekend": 50}}
-    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]), \
-         patch("scripts.hourly_bus_sync.BUS_COLLECTION_TARGETS", {"M60+": {"weekday": 200, "weekend": 200}}):
-        assert all_targets_met(counts) is False
+def test_coverage_complete_is_false_for_a_corridor_with_no_real_buckets():
+    # Q3 has real-looking numbers for M60+ but zero evidence of its own
+    # (total=0) -- must not count as "ready", zero real buckets is not
+    # the same as 100% coverage.
+    coverage = {
+        "M60+": {"weekday": (95, 100), "weekend": (95, 100)},
+        "Q3": {"weekday": (0, 0), "weekend": (0, 0)},
+    }
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q3"]):
+        assert coverage_complete(coverage) is False
 
 
-def test_all_targets_met_is_true_once_every_tracked_corridor_hits_both_day_types():
-    counts = {"M60+": {"weekday": 250, "weekend": 250}, "Q70+": {"weekday": 60, "weekend": 60}}
-    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q70+"]), \
-         patch("scripts.hourly_bus_sync.BUS_COLLECTION_TARGETS", {
-             "M60+": {"weekday": 200, "weekend": 200},
-             "Q70+": {"weekday": 50, "weekend": 50},
-         }):
-        assert all_targets_met(counts) is True
+def test_coverage_complete_is_false_when_weekend_still_below_fraction():
+    coverage = {"M60+": {"weekday": (95, 100), "weekend": (50, 100)}}  # weekend only 50%
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
+        assert coverage_complete(coverage) is False
 
 
-def test_check_and_maybe_stop_collection_writes_marker_only_when_met():
+def test_coverage_complete_is_true_once_every_tracked_corridor_clears_the_fraction():
+    coverage = {
+        "M60+": {"weekday": (91, 100), "weekend": (90, 100)},  # exactly 90%
+        "Q70+": {"weekday": (18, 20), "weekend": (19, 20)},
+    }
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q70+"]):
+        assert coverage_complete(coverage) is True
+
+
+def test_check_and_maybe_stop_collection_writes_marker_only_when_complete():
     written = []
     with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]), \
-         patch("scripts.hourly_bus_sync.BUS_COLLECTION_TARGETS", {"M60+": {"weekday": 100, "weekend": 100}}), \
-         patch("scripts.hourly_bus_sync.local_route_day_type_counts",
-               return_value={"M60+": {"weekday": 50, "weekend": 50}}), \
+         patch("scripts.hourly_bus_sync.categorize_bus_data"), \
+         patch("scripts.hourly_bus_sync.real_bucket_coverage",
+               return_value={"M60+": {"weekday": (10, 100), "weekend": (10, 100)}}), \
          patch("scripts.hourly_bus_sync._write_remote_marker", side_effect=lambda c: written.append(c)):
-        assert check_and_maybe_stop_collection() is False
+        stopped, coverage = check_and_maybe_stop_collection()
+    assert stopped is False
+    assert coverage == {"M60+": {"weekday": (10, 100), "weekend": (10, 100)}}
     assert written == []
 
 
-def test_check_and_maybe_stop_collection_writes_marker_when_targets_met():
+def test_check_and_maybe_stop_collection_writes_marker_when_coverage_complete():
     written = []
     with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]), \
-         patch("scripts.hourly_bus_sync.BUS_COLLECTION_TARGETS", {"M60+": {"weekday": 100, "weekend": 100}}), \
-         patch("scripts.hourly_bus_sync.local_route_day_type_counts",
-               return_value={"M60+": {"weekday": 150, "weekend": 150}}), \
+         patch("scripts.hourly_bus_sync.categorize_bus_data"), \
+         patch("scripts.hourly_bus_sync.real_bucket_coverage",
+               return_value={"M60+": {"weekday": (95, 100), "weekend": (95, 100)}}), \
          patch("scripts.hourly_bus_sync._write_remote_marker", side_effect=lambda c: written.append(c)):
-        assert check_and_maybe_stop_collection() is True
+        stopped, coverage = check_and_maybe_stop_collection()
+    assert stopped is True
+    assert coverage == {"M60+": {"weekday": (95, 100), "weekend": (95, 100)}}
     assert len(written) == 1
-    assert json.loads(written[0]) == {"M60+": {"weekday": 150, "weekend": 150}}

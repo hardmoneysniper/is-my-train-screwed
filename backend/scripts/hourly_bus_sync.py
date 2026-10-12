@@ -39,9 +39,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.day_type import day_type_for  # noqa: E402
+from app.risk_engine import MIN_N_OBSERVATIONS  # noqa: E402
 from collectors.bus_collector import CORRIDORS  # noqa: E402
+from db import get_connection  # noqa: E402
+from scripts.aggregate_reliability_buckets import run_aggregate  # noqa: E402
+from scripts.derive_bus_arrival_events import run_derive as derive_bus_arrival_events_run_derive  # noqa: E402
 
 LOCAL_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
+LOCAL_PIPELINE_DB_PATH = Path(__file__).parent.parent / "data" / "local_pipeline.sqlite3"
 
 PROJECT_ID = "77096939-d30b-46a4-b439-c545aff3fe25"
 SERVICE_ID = "f66ebb7b-778d-4041-bde9-d66ce5c17223"  # backend
@@ -77,23 +82,29 @@ REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
 # for the SAME vehicle approaching, not new events). Real ratio: ~17.4
 # raw records per 1 unit of n_observations, not ~1.
 #
-# Targets below are recomputed as distinct_stops * 24h * 200 (n-gate) *
-# 17.4 (the measured real ratio, replacing the old formula's implicit
-# ~1.5), using the same real stop counts as before (2026-10-01): Q70+=7,
-# M60+=38, Q102=32, Q3=79, B15=139, Q10=43, Q72=35, Q80=33, Q90=16. This
-# is still a rough, provisional correction, NOT independently re-measured
-# per route -- it applies Q90's one measured ratio uniformly, and Q90 is
-# a low-frequency route; a high-frequency trunk/SBS route (M60+, B15)
-# likely has a meaningfully better real ratio that this overstates, while
-# an even-lower-frequency stop/hour on some other route could understate
-# it. At these corrected magnitudes, full completion for the slowest
-# buckets is realistically months away, not weeks -- a genuinely open
-# question (same family as the subway MIN_N_OBSERVATIONS=200 discussion)
-# is whether bus should keep this per-hour bucket granularity and a
-# uniform n=200 threshold at all, or use broader time-of-day buckets /a
-# lower per-agency threshold instead. Not decided yet -- these numbers
-# are "keep collecting, don't re-trigger prematurely," not a validated
-# completion criterion.
+# 2026-10-12 FINAL RESOLUTION: the raw-record-count proxy approach (both
+# the original and the 17.4x-corrected version below) is retired as the
+# stopping criterion. It failed twice for the same root reason: real
+# per-bucket yield varies too much (even within one corridor) for any
+# single "raw records needed" scalar to mean anything -- a literal
+# recomputation attempt produced a 5-million-record target for one
+# corridor, dominated by its single worst bucket. Separately, bus
+# reliability_buckets moved from literal hour-of-day to real per-route
+# SCHEDULED-headway periods (app/bus_schedule_periods.py) the same day,
+# which alone produced a real ~10x jump in citable buckets -- making the
+# whole premise of predicting raw-record needs from the OLD bucket
+# structure moot anyway.
+#
+# Replaced with real_bucket_coverage() below: runs the actual local
+# derive+aggregate pipeline (same one run_local_pipeline.py uses) against
+# freshly-synced raw data every hour -- "categorizing" it, not just
+# collecting it -- then measures the REAL fraction of each corridor's
+# real (ever-observed) buckets that clear MIN_N_OBSERVATIONS directly
+# from reliability_buckets. No more predicting; just measuring.
+#
+# BUS_COLLECTION_TARGETS is kept only as a cheap, zero-GTFS-parsing raw
+# progress indicator for status-check logging (how much raw collection
+# volume exists) -- it is NOT consulted for the stop decision anymore.
 BUS_COLLECTION_TARGETS = {
     "Q70+": {"weekday": 584_640, "weekend": 584_640},
     "M60+": {"weekday": 3_173_760, "weekend": 3_173_760},
@@ -189,33 +200,88 @@ def local_route_day_type_counts() -> dict[str, dict[str, int]]:
     return counts
 
 
-def all_targets_met(counts: dict[str, dict[str, int]]) -> bool:
-    """Every corridor in CORRIDORS must have a defined target in
-    BUS_COLLECTION_TARGETS AND meet it, for both weekday and weekend. A
-    corridor with no target entry yet (e.g. a newly-added one, see
-    BUS_COLLECTION_TARGETS's comment) is always "not met" -- collection
-    keeps running until real targets exist for every tracked corridor."""
+# 2026-10-12 (user): a corridor/day_type is "ready to stop" once this
+# fraction of its real (ever-observed, n_observations > 0) buckets clear
+# MIN_N_OBSERVATIONS -- not 100%: some scheduled slots may see so little
+# real traffic that chasing every last one isn't worth the wait (the
+# same lesson as the retired raw-record-target attempts), and a bucket
+# that's NEVER been observed even once gives no evidence either way, so
+# it's excluded from the denominator rather than counted as "not ready".
+COVERAGE_COMPLETION_FRACTION = 0.90
+
+
+def categorize_bus_data() -> None:
+    """Runs the real local pipeline (derive_bus_arrival_events +
+    aggregate_reliability_buckets, same functions run_local_pipeline.py
+    uses) against whatever raw data is on disk, folding it into
+    local_pipeline.sqlite3's reliability_buckets. Both steps are
+    idempotent (processed_days bookkeeping) -- safe to call every hour
+    even when nothing new was synced; it just no-ops quickly. This is the
+    "categorize" step (2026-10-12, user) -- turns raw collected data into
+    real, query-ready reliability buckets on a regular cadence, not just
+    once in a while."""
+    conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
+    try:
+        derive_bus_arrival_events_run_derive(LOCAL_DIR, conn)
+        run_aggregate(conn)
+    finally:
+        conn.close()
+
+
+def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
+    """{route: {day_type: (buckets_cleared, real_buckets_total)}} measured
+    directly from local_pipeline.sqlite3's reliability_buckets -- the
+    actual thing that matters (can get_risk cite from this bucket), not a
+    raw-record proxy for it. Call categorize_bus_data() first so this
+    reflects the latest synced data."""
+    conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
+    try:
+        coverage: dict[str, dict[str, tuple[int, int]]] = {}
+        for route in CORRIDORS:
+            coverage[route] = {}
+            for day_type in ("weekday", "weekend"):
+                rows = conn.execute(
+                    """
+                    SELECT n_observations FROM reliability_buckets
+                    WHERE agency = 'bus' AND route_id = ? AND day_type = ?
+                      AND stat_type IN ('headway', 'prediction_error')
+                      AND n_observations > 0
+                    """,
+                    (route, day_type),
+                ).fetchall()
+                total = len(rows)
+                cleared = sum(1 for r in rows if r[0] >= MIN_N_OBSERVATIONS)
+                coverage[route][day_type] = (cleared, total)
+        return coverage
+    finally:
+        conn.close()
+
+
+def coverage_complete(coverage: dict[str, dict[str, tuple[int, int]]]) -> bool:
+    """Every corridor in CORRIDORS must clear COVERAGE_COMPLETION_FRACTION
+    for BOTH day types. A day_type with zero real (ever-observed) buckets
+    is always "not ready" -- no evidence yet, not an automatic pass."""
     for route in CORRIDORS:
-        targets = BUS_COLLECTION_TARGETS.get(route)
-        if targets is None:
-            return False
-        for day_type, target in targets.items():
-            if counts.get(route, {}).get(day_type, 0) < target:
+        for day_type in ("weekday", "weekend"):
+            cleared, total = coverage.get(route, {}).get(day_type, (0, 0))
+            if total == 0 or cleared / total < COVERAGE_COMPLETION_FRACTION:
                 return False
     return True
 
 
-def check_and_maybe_stop_collection() -> bool:
-    """After a sync, checks cumulative local totals against
-    BUS_COLLECTION_TARGETS; if every tracked corridor has met its target
-    for both day types, writes the stop marker to Railway (main.py's own
-    loop watches for it and cancels the collector). Returns True if the
-    marker was (already, or just now) written."""
-    counts = local_route_day_type_counts()
-    if not all_targets_met(counts):
-        return False
-    _write_remote_marker(json.dumps(counts))
-    return True
+def check_and_maybe_stop_collection() -> tuple[bool, dict[str, dict[str, tuple[int, int]]]]:
+    """Categorizes the latest synced data, measures real bucket coverage,
+    and writes the stop marker to Railway (main.py's own loop watches for
+    it and cancels the collector) if every tracked corridor has cleared
+    COVERAGE_COMPLETION_FRACTION for both day types. Returns (marker_
+    written, coverage) -- the caller logs coverage either way, so a
+    "still collecting" run still reports real per-corridor progress."""
+    categorize_bus_data()
+    coverage = real_bucket_coverage()
+    if not coverage_complete(coverage):
+        return False, coverage
+    _write_remote_marker(json.dumps(coverage))
+    return True, coverage
 
 
 def sync_once() -> dict[str, int]:
@@ -257,9 +323,14 @@ if __name__ == "__main__":
         print("[hourly-bus-sync] nothing new", flush=True)
 
     try:
-        stopped = check_and_maybe_stop_collection()
+        stopped, coverage = check_and_maybe_stop_collection()
     except Exception as e:
-        print(f"[hourly-bus-sync] collection target check failed: {e!r}", file=sys.stderr, flush=True)
+        print(f"[hourly-bus-sync] categorize/coverage check failed: {e!r}", file=sys.stderr, flush=True)
         sys.exit(1)
+    for route in CORRIDORS:
+        for day_type in ("weekday", "weekend"):
+            cleared, total = coverage.get(route, {}).get(day_type, (0, 0))
+            pct = (cleared / total * 100) if total else 0.0
+            print(f"[hourly-bus-sync] coverage {route} {day_type}: {cleared}/{total} buckets >= n={MIN_N_OBSERVATIONS} ({pct:.0f}%)", flush=True)
     if stopped:
-        print("[hourly-bus-sync] all corridor targets met, wrote stop marker to Railway", flush=True)
+        print("[hourly-bus-sync] all corridors cleared real bucket coverage, wrote stop marker to Railway", flush=True)
