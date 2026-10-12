@@ -48,6 +48,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+from app import bus_schedule_periods
 from app.day_type import day_type_for
 from app.models.risk import TransferRisk
 from app.models.transit import Itinerary, Leg
@@ -312,8 +313,17 @@ def _compute_transfer_risk(
     # -> precomputed TransferRisk lookup here, before falling through to the live
     # path below.
 
-    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket, _incoming_stat_type(agency_i))
-    outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type, hour_bucket, "headway")
+    # 2026-10-12 (user): bus buckets are keyed by real scheduled-headway
+    # period, not literal hour-of-day (see app/bus_schedule_periods.py
+    # and aggregate_reliability_buckets.py's _effective_hour_bucket,
+    # which wrote them this way) -- a bus-side lookup must map through
+    # the SAME function or it will miss real buckets. Subway is
+    # unaffected, same literal hour_bucket as always.
+    hour_bucket_i = bus_schedule_periods.period_hour_for(route_id_i, day_type, hour_bucket) if agency_i == "bus" else hour_bucket
+    hour_bucket_j = bus_schedule_periods.period_hour_for(route_id_j, day_type, hour_bucket) if agency_j == "bus" else hour_bucket
+
+    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket_i, _incoming_stat_type(agency_i))
+    outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type, hour_bucket_j, "headway")
 
     # 2026-10-12 redesign: the miss percentage (quality/p_miss/n/window_days)
     # and the wait-time/reroute-offer signal are independently gated, each

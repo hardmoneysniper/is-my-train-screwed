@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import app.bus_schedule_periods as bus_schedule_periods
 from app.models.risk import ReliabilityBucket
 from db import get_connection
 from scripts.aggregate_reliability_buckets import HIST_CONFIG, run_aggregate
@@ -157,7 +158,12 @@ def test_headway_assigned_to_later_events_hour_bucket(conn):
     assert bucket_9["histogram"]["counts"][3] == 1.0
 
 
-def test_bus_day_produces_zero_delay_buckets_but_other_stats_populate(conn):
+def test_bus_day_produces_zero_delay_buckets_but_other_stats_populate(conn, monkeypatch):
+    # Isolates this test from real GTFS schedule-period lookups (already
+    # covered by test_bus_schedule_periods.py) -- identity mapping keeps
+    # this test about the fold logic, not period derivation.
+    monkeypatch.setattr(bus_schedule_periods, "period_hour_for", lambda route_id, day_type, hour: hour)
+
     _insert_event(
         conn,
         agency="bus",
@@ -193,6 +199,61 @@ def test_bus_day_produces_zero_delay_buckets_but_other_stats_populate(conn):
         "SELECT COUNT(*) AS c FROM reliability_buckets WHERE agency = 'bus' AND stat_type = 'delay'"
     ).fetchone()["c"]
     assert total_delay_buckets == 0
+
+
+def test_bus_bucket_key_uses_real_period_mapping_subway_stays_literal(conn, monkeypatch):
+    # A real (non-identity) mapping: hour 8 collapses into period-hour 5
+    # for bus, confirming the fold genuinely routes through
+    # bus_schedule_periods.period_hour_for rather than only proving it
+    # CAN be called (the identity-mock test above can't distinguish "the
+    # real mapping is used" from "the mapping is ignored").
+    monkeypatch.setattr(
+        bus_schedule_periods, "period_hour_for",
+        lambda route_id, day_type, hour: 5 if hour == 8 else hour,
+    )
+    # Two events (headway needs a consecutive pair to produce one
+    # observation -- a single event alone yields zero headway entries).
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="Q90",
+        stop_id="553293",
+        vehicle_id="MTABC_1",
+        delay_seconds=None,
+        hour_bucket=8,
+        observed_arrival_ts=datetime(2026, 8, 24, 8, 0, 0, tzinfo=timezone.utc),
+    )
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="Q90",
+        stop_id="553293",
+        vehicle_id="MTABC_2",
+        delay_seconds=None,
+        hour_bucket=8,
+        observed_arrival_ts=datetime(2026, 8, 24, 8, 10, 0, tzinfo=timezone.utc),
+    )
+    # A parallel subway event at the same literal hour -- must stay keyed
+    # at hour 8, proving subway is untouched by the bus-only remap.
+    _insert_event(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="B06",
+        vehicle_id="F_1",
+        delay_seconds=45,
+        hour_bucket=8,
+    )
+    run_aggregate(conn)
+
+    assert _get_bucket(conn, "bus", "Q90", "553293", "N", "weekday", 8, "headway") is None
+    bus_bucket = _get_bucket(conn, "bus", "Q90", "553293", "N", "weekday", 5, "headway")
+    assert bus_bucket is not None
+    assert bus_bucket["n_observations"] == 1
+
+    subway_bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
+    assert subway_bucket is not None
+    assert subway_bucket["n_observations"] == 1
 
 
 def test_ambiguous_prediction_error_excluded_from_histogram_but_counted_in_n_ambiguous(conn):
