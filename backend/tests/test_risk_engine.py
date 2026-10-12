@@ -554,6 +554,108 @@ def test_should_offer_reroute_is_true_whenever_typical_wait_seconds_is_citable(c
     assert r.should_offer_reroute is True
 
 
+# --- late-night bus citation suppression (2026-10-12) --------------------
+
+
+def _late_night_bus_itinerary(incoming_mode: str, outgoing_mode: str):
+    return Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode=incoming_mode,
+                route_short_name="Q102" if incoming_mode == "BUS" else "F",
+                from_stop_id="MTABC:400000" if incoming_mode == "BUS" else "MTA_NYCT_Subway:B06N",
+                from_stop_name="Start",
+                to_stop_id="MTABC:450154" if incoming_mode == "BUS" else "MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 1, 50, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 2, 0, 0),
+            ),
+            Leg(
+                mode=outgoing_mode,
+                route_short_name="Q70-SBS" if outgoing_mode == "BUS" else "Q",
+                from_stop_id="MTABC:450154" if outgoing_mode == "BUS" else "MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTABC:460000" if outgoing_mode == "BUS" else "MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 2, 5, 0),  # 2am local, weekday
+                end_time_ms=_local_ms(2026, 8, 24, 2, 15, 0),
+            ),
+        ],
+    )
+
+
+def test_late_night_bus_incoming_leg_is_never_cited_even_with_abundant_data(conn, route_index):
+    # A 2am transfer -- bus's own ANCHOR_HOUR=5 overnight boundary --
+    # with a real, abundant (n=200) incoming bucket present. Must still
+    # read insufficient: "almost nobody rides a bus at 2am" (user), so
+    # this is never cited regardless of how much data piles up.
+    _insert_bucket(
+        conn,
+        agency="bus",
+        route_id="Q102",
+        stop_id="450154",
+        day_type="weekday",
+        hour_bucket=2,
+        stat_type="prediction_error",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+    results = get_risk(_late_night_bus_itinerary("BUS", "SUBWAY"), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "insufficient"
+    assert r.p_miss is None
+    assert r.n == 0
+
+
+def test_late_night_bus_outgoing_leg_has_no_wait_time_even_with_abundant_data(conn, route_index):
+    _insert_bucket(
+        conn,
+        agency="bus",
+        route_id="Q70-SBS",
+        stop_id="450154",
+        day_type="weekday",
+        hour_bucket=2,
+        stat_type="headway",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 4 else 0.0 for i in range(81)]}),
+        n_observations=200,
+    )
+    results = get_risk(_late_night_bus_itinerary("SUBWAY", "BUS"), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.typical_wait_seconds is None
+    assert r.should_offer_reroute is False
+
+
+def test_late_night_subway_is_unaffected(conn, route_index):
+    # Subway runs a real, if reduced, overnight service -- only bus is
+    # suppressed at this hour.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=2,
+        stat_type="delay",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+    results = get_risk(_late_night_bus_itinerary("SUBWAY", "SUBWAY"), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.p_miss is not None
+
+
 # --- bus weekend/weekday bucket merge (2026-10-12) -----------------------
 
 

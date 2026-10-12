@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app import bus_schedule_periods  # noqa: E402
 from app.day_type import day_type_for  # noqa: E402
 from app.risk_engine import MIN_N_OBSERVATIONS  # noqa: E402
 from collectors.bus_collector import CORRIDORS  # noqa: E402
@@ -233,7 +234,14 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
     directly from local_pipeline.sqlite3's reliability_buckets -- the
     actual thing that matters (can get_risk cite from this bucket), not a
     raw-record proxy for it. Call categorize_bus_data() first so this
-    reflects the latest synced data."""
+    reflects the latest synced data.
+
+    Excludes hour_bucket < bus_schedule_periods.ANCHOR_HOUR (2026-10-12,
+    user: "almost nobody rides a bus at 2am thus almost nobody is using
+    our service" for it) -- risk_engine.py never cites these buckets
+    (see its _is_late_night_bus), so tracking "coverage" for them here
+    would just be noise that drags down a route's real completion
+    status over slots nobody will ever see a probability for."""
     conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
     try:
         coverage: dict[str, dict[str, tuple[int, int]]] = {}
@@ -246,8 +254,9 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
                     WHERE agency = 'bus' AND route_id = ? AND day_type = ?
                       AND stat_type IN ('headway', 'prediction_error')
                       AND n_observations > 0
+                      AND hour_bucket >= ?
                     """,
-                    (route, day_type),
+                    (route, day_type, bus_schedule_periods.ANCHOR_HOUR),
                 ).fetchall()
                 total = len(rows)
                 cleared = sum(1 for r in rows if r[0] >= MIN_N_OBSERVATIONS)

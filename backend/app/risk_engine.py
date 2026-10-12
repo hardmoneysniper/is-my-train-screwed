@@ -58,6 +58,18 @@ from db import get_connection
 LOCAL_TZ = ZoneInfo("America/New_York")
 
 MIN_N_OBSERVATIONS = 50
+
+# 2026-10-12 (user): "almost nobody rides a bus at 2am thus almost nobody
+# is using our service" for it -- bus citations are disabled for hours
+# before bus_schedule_periods.ANCHOR_HOUR (the same real, GTFS-derived
+# overnight-to-morning transition point that module already anchors its
+# own hour-clustering at, not a new separate threshold). Collection keeps
+# running for these hours regardless (the collector has no time-of-day
+# filter, and keeping the data is free) -- this only suppresses CITING
+# them, so a late-night bus leg always reads as quality="insufficient"/
+# typical_wait_seconds=None, same shape as any other no-data case, never
+# a fabricated low-confidence number. Subway is unaffected: it runs a
+# real, if reduced, overnight service with real riders, unlike a 2am bus.
 # 2026-10-12 (user): lowered from 200. With p_miss now a single-
 # distribution exact calculation (not a compound two-distribution Monte
 # Carlo estimate), 200 real observations isn't needed for a defensible
@@ -279,6 +291,10 @@ def _incoming_stat_type(agency_i: str) -> str:
     return "delay" if agency_i == "subway" else "prediction_error"
 
 
+def _is_late_night_bus(agency: str, hour: int) -> bool:
+    return agency == "bus" and hour < bus_schedule_periods.ANCHOR_HOUR
+
+
 def _compute_transfer_risk(
     conn: sqlite3.Connection,
     agency_i: str,
@@ -315,8 +331,19 @@ def _compute_transfer_risk(
         if agency_j == "bus" else (day_type, hour_bucket)
     )
 
-    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type_i, hour_bucket_i, _incoming_stat_type(agency_i))
-    outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type_j, hour_bucket_j, "headway")
+    # 2026-10-12 (user): never cite a bus leg this late at night -- see
+    # MIN_N_OBSERVATIONS's neighboring comment. Checked against the real
+    # literal hour (not the period-mapped one), since this is about real
+    # clock time, not which schedule-period cluster the hour falls into.
+    # Collection itself is untouched; only fetching/citing is skipped.
+    incoming = (
+        None if _is_late_night_bus(agency_i, hour_bucket)
+        else _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type_i, hour_bucket_i, _incoming_stat_type(agency_i))
+    )
+    outgoing = (
+        None if _is_late_night_bus(agency_j, hour_bucket)
+        else _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type_j, hour_bucket_j, "headway")
+    )
 
     # 2026-10-12 redesign: the miss percentage (quality/p_miss/n/window_days)
     # and the wait-time/reroute-offer signal are independently gated, each
