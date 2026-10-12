@@ -43,7 +43,6 @@ decisions, not arbitrary choices made while coding):
 """
 import json
 import pathlib
-import random
 import sqlite3
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -57,7 +56,6 @@ from db import get_connection
 LOCAL_TZ = ZoneInfo("America/New_York")
 
 MIN_N_OBSERVATIONS = 200
-MONTE_CARLO_DRAWS = 1000
 # Freshness cap for citations (task-6-brief.md step 6): a transfer-risk
 # citation never claims to reflect more than this many days of history,
 # even once real collection has run far longer -- transit patterns and
@@ -206,27 +204,56 @@ def _bin_midpoints_and_weights(histogram: dict) -> tuple[list[float], list[float
     return midpoints, counts
 
 
-def _monte_carlo_p_miss(incoming_histogram: dict, outgoing_histogram: dict, buffer_seconds: float, draws: int = MONTE_CARLO_DRAWS) -> float:
-    """~1000-draw Monte Carlo (task-6-brief.md step 5 -- the controller's
-    own resolution of an underspecified part of the spec, stated plainly
-    for review, not an arbitrary choice). Each draw samples an incoming
-    prediction-error offset and an outgoing headway independently from
-    their respective histograms (weighted choice over bins by count,
-    using each bin's midpoint). A draw counts as a miss only if the
-    incoming leg blows the buffer AND the overrun isn't absorbed by a
-    frequent-enough outgoing service."""
-    incoming_midpoints, incoming_weights = _bin_midpoints_and_weights(incoming_histogram)
-    outgoing_midpoints, outgoing_weights = _bin_midpoints_and_weights(outgoing_histogram)
+def _p_miss_from_incoming(incoming_histogram: dict, buffer_seconds: float) -> float:
+    """2026-10-12 redesign (user-directed): a miss is now defined purely as
+    "did the incoming leg run late enough that you arrived after your
+    planned connection already departed" -- i.e. incoming_offset >
+    buffer_seconds, nothing more. The previous version also required the
+    overrun to exceed the outgoing route's typical headway (reasoning:
+    missing one bus barely matters if the next one comes in 3 minutes) --
+    but that silently baked a judgment call ("does missing it matter?")
+    into the cited number itself, and coupled the citation to TWO
+    independent buckets instead of one. Splitting them: this function
+    answers the narrow, honest question ("did you catch the one OTP
+    planned for you") from the incoming bucket alone; _typical_wait_seconds
+    below answers the separate, independently-gated question ("how long do
+    you wait if you didn't"), which the Conversation Agent is instructed to
+    always state alongside this percentage, never in place of it.
 
-    incoming_samples = random.choices(incoming_midpoints, weights=incoming_weights, k=draws)
-    outgoing_samples = random.choices(outgoing_midpoints, weights=outgoing_weights, k=draws)
+    Computed exactly over the full histogram (sum of bin weight past the
+    buffer, divided by total weight) rather than Monte Carlo sampled --
+    a single-distribution threshold probability has a closed form, no
+    need to introduce sampling noise into a cited number."""
+    midpoints, weights = _bin_midpoints_and_weights(incoming_histogram)
+    total = sum(weights)
+    miss_weight = sum(w for m, w in zip(midpoints, weights) if m > buffer_seconds)
+    return miss_weight / total
 
-    misses = sum(
-        1
-        for incoming_offset, outgoing_headway in zip(incoming_samples, outgoing_samples)
-        if incoming_offset > buffer_seconds and (incoming_offset - buffer_seconds) >= outgoing_headway
-    )
-    return misses / draws
+
+def _typical_wait_seconds(outgoing_histogram: dict) -> float:
+    """Weighted mean of the outgoing route's headway histogram -- "if you
+    miss the planned vehicle, how long do you typically wait for the next
+    one." Independently gated on the outgoing bucket's own n_observations
+    (see _compute_transfer_risk), separate from whether the incoming
+    bucket is sufficient for a miss percentage."""
+    midpoints, weights = _bin_midpoints_and_weights(outgoing_histogram)
+    return sum(m * w for m, w in zip(midpoints, weights)) / sum(weights)
+
+
+# 2026-10-12 (user): rush vs. non-rush reroute-offer thresholds -- waiting
+# over ~7-8 minutes during rush, or ~15 minutes off-peak, starts
+# meaningfully affecting a real trip. A plain policy choice, not derived
+# from data, same spirit as MAX_WINDOW_DAYS above. RUSH_HOURS is a
+# standard NYC AM/PM rush approximation (7-9am, 4-7pm), used only to pick
+# which threshold applies -- also a policy choice, not a measured cutoff.
+RUSH_HOURS = {7, 8, 9, 16, 17, 18, 19}
+RUSH_WAIT_THRESHOLD_SECONDS = 7.5 * 60
+NONRUSH_WAIT_THRESHOLD_SECONDS = 15 * 60
+
+
+def _wait_threshold_seconds(day_type: str, hour_bucket: int) -> float:
+    is_rush = day_type == "weekday" and hour_bucket in RUSH_HOURS
+    return RUSH_WAIT_THRESHOLD_SECONDS if is_rush else NONRUSH_WAIT_THRESHOLD_SECONDS
 
 
 def _incoming_stat_type(agency_i: str) -> str:
@@ -267,38 +294,46 @@ def _compute_transfer_risk(
     day_type: str,
     hour_bucket: int,
     buffer_seconds: float,
-) -> tuple[float | None, float, int, str]:
+) -> tuple[float | None, float, int, str, float | None, bool]:
     # Precompute lookup slot (deferred -- see docs/superpowers/plans/2026-08-27-phase-2-risk-engine-plan.md
     # Task 6 and README.md's "Known deferrals"). Not built yet: no 30+ days of real
     # data exist to run it against. When built, check a small (route_pair, day_type)
     # -> precomputed TransferRisk lookup here, before falling through to the live
-    # Monte Carlo path below.
+    # path below.
 
     incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket, _incoming_stat_type(agency_i))
     outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type, hour_bucket, "headway")
 
+    # 2026-10-12 redesign: the miss percentage (quality/p_miss/n/window_days)
+    # and the wait-time/reroute-offer signal are independently gated, each
+    # on its own single bucket -- a citable percentage no longer requires
+    # the outgoing bucket too, and vice versa (see _p_miss_from_incoming's
+    # docstring for why).
     incoming_n = incoming["n_observations"] if incoming else 0.0
+    n = incoming_n
+    window_days = _window_days(incoming["window_start"]) if incoming else 0
+    p_miss: float | None = None
+    quality = "insufficient"
+    if incoming is not None and incoming_n >= MIN_N_OBSERVATIONS:
+        incoming_histogram = json.loads(incoming["histogram"])
+        # Cheap insurance (final whole-branch review, Minor #2, still
+        # applies): an all-zero histogram is just as "no real signal" as
+        # a missing bucket, so degrade the same way rather than divide by
+        # zero in _p_miss_from_incoming.
+        if sum(incoming_histogram["counts"]) > 0:
+            p_miss = _p_miss_from_incoming(incoming_histogram, buffer_seconds)
+            quality = "ok"
+
     outgoing_n = outgoing["n_observations"] if outgoing else 0.0
-    n = min(incoming_n, outgoing_n)
-    window_days_incoming = _window_days(incoming["window_start"]) if incoming else 0
-    window_days_outgoing = _window_days(outgoing["window_start"]) if outgoing else 0
-    window_days = min(window_days_incoming, window_days_outgoing)
+    typical_wait_seconds: float | None = None
+    should_offer_reroute = False
+    if outgoing is not None and outgoing_n >= MIN_N_OBSERVATIONS:
+        outgoing_histogram = json.loads(outgoing["histogram"])
+        if sum(outgoing_histogram["counts"]) > 0:
+            typical_wait_seconds = _typical_wait_seconds(outgoing_histogram)
+            should_offer_reroute = typical_wait_seconds > _wait_threshold_seconds(day_type, hour_bucket)
 
-    if incoming is None or outgoing is None or incoming_n < MIN_N_OBSERVATIONS or outgoing_n < MIN_N_OBSERVATIONS:
-        return None, n, window_days, "insufficient"
-
-    incoming_histogram = json.loads(incoming["histogram"])
-    outgoing_histogram = json.loads(outgoing["histogram"])
-    # Cheap insurance (final whole-branch review, Minor #2): random.choices
-    # raises if every weight is zero. Confirmed unreachable with real data
-    # today (the aggregator increments counts and n_observations in
-    # lockstep, so n_observations >= MIN_N_OBSERVATIONS implies a non-empty
-    # histogram) -- but an all-zero histogram is just as "no real signal"
-    # as a missing bucket, so degrade the same way rather than crash.
-    if sum(incoming_histogram["counts"]) == 0 or sum(outgoing_histogram["counts"]) == 0:
-        return None, n, window_days, "insufficient"
-    p_miss = _monte_carlo_p_miss(incoming_histogram, outgoing_histogram, buffer_seconds)
-    return p_miss, n, window_days, "ok"
+    return p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute
 
 
 def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, route_index: RouteIndex) -> TransferRisk:
@@ -327,7 +362,7 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
     day_type, hour_bucket = _local_day_type_and_hour(leg_j.start_time_ms)
     buffer_seconds = (leg_j.start_time_ms - leg_i.end_time_ms) / 1000
 
-    p_miss, n, window_days, quality = _compute_transfer_risk(
+    p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute = _compute_transfer_risk(
         conn, agency_i, route_id_i, stop_id_i, agency_j, route_id_j, stop_id_j,
         day_type, hour_bucket, buffer_seconds,
     )
@@ -338,6 +373,8 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
         p_miss=p_miss,
         n=n,
         window_days=window_days,
+        typical_wait_seconds=typical_wait_seconds,
+        should_offer_reroute=should_offer_reroute,
         quality=quality,
     )
 

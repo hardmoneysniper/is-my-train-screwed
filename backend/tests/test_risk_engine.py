@@ -224,6 +224,11 @@ def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index)
     assert 0.0 <= r.p_miss <= 1.0
     assert r.n == 200
     assert r.window_days == 20  # window_start is far enough in the past to hit the 20-day cap
+    # Outgoing headway histogram's one weighted bin has midpoint 135s
+    # (min_s=0, bin_width=30, i=4 -> 0+30*4.5=135); well under the
+    # weekday-hour-8 rush threshold (450s), so no reroute offer.
+    assert r.typical_wait_seconds == 135.0
+    assert r.should_offer_reroute is False
 
 
 def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficient(conn, route_index):
@@ -290,8 +295,14 @@ def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficien
     results = get_risk(itinerary, conn=conn, route_index=route_index)
 
     assert len(results) == 1
-    assert results[0].quality == "insufficient"
-    assert results[0].p_miss is None
+    r = results[0]
+    assert r.quality == "insufficient"
+    assert r.p_miss is None
+    # 2026-10-12 redesign: the outgoing bucket (real, sufficient data) is
+    # independently gated from the incoming one -- typical_wait_seconds
+    # must still populate even though the miss percentage can't.
+    assert r.typical_wait_seconds == 135.0
+    assert r.should_offer_reroute is False
 
 
 def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_index):
@@ -358,8 +369,13 @@ def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_
     results = get_risk(itinerary, conn=conn, route_index=route_index)
 
     assert len(results) == 1
-    assert results[0].quality == "insufficient"
-    assert results[0].p_miss is None
+    r = results[0]
+    assert r.quality == "insufficient"
+    assert r.p_miss is None
+    # Same independent-gating point as the subway test above, mirrored for
+    # the bus-incoming case.
+    assert r.typical_wait_seconds == 135.0
+    assert r.should_offer_reroute is False
 
 
 def test_incoming_stat_type_is_agency_dependent():
@@ -371,12 +387,7 @@ def test_incoming_stat_type_is_agency_dependent():
 # --- insufficient data: missing bucket, or n < 200 -----------------------
 
 
-def test_missing_buckets_returns_insufficient_and_skips_monte_carlo(conn, route_index, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        risk_engine, "_monte_carlo_p_miss", lambda *a, **k: calls.append(1) or 0.5
-    )
-
+def test_missing_buckets_returns_insufficient(conn, route_index):
     itinerary = Itinerary(
         duration_seconds=900,
         legs=[
@@ -411,15 +422,11 @@ def test_missing_buckets_returns_insufficient_and_skips_monte_carlo(conn, route_
     assert r.p_miss is None
     assert r.n == 0
     assert r.window_days == 0
-    assert calls == []  # Monte Carlo genuinely never ran
+    assert r.typical_wait_seconds is None
+    assert r.should_offer_reroute is False
 
 
-def test_low_n_bucket_returns_insufficient_and_skips_monte_carlo(conn, route_index, monkeypatch):
-    calls = []
-    monkeypatch.setattr(
-        risk_engine, "_monte_carlo_p_miss", lambda *a, **k: calls.append(1) or 0.5
-    )
-
+def test_low_n_bucket_returns_insufficient(conn, route_index):
     _insert_bucket(
         conn,
         agency="subway",
@@ -430,6 +437,9 @@ def test_low_n_bucket_returns_insufficient_and_skips_monte_carlo(conn, route_ind
         stat_type="delay",  # subway incoming leg reads "delay", not "prediction_error"
         n_observations=50,  # below the n=200 threshold
     )
+    # n=300 clears the threshold, but an all-zero histogram is just as "no
+    # real signal" -- must still degrade typical_wait_seconds to None, not
+    # divide by zero in _typical_wait_seconds.
     _insert_bucket(
         conn,
         agency="subway",
@@ -473,8 +483,69 @@ def test_low_n_bucket_returns_insufficient_and_skips_monte_carlo(conn, route_ind
     r = results[0]
     assert r.quality == "insufficient"
     assert r.p_miss is None
-    assert r.n == 50  # min(50, 300)
-    assert calls == []
+    assert r.n == 50  # incoming bucket's own n_observations
+    assert r.typical_wait_seconds is None  # outgoing bucket's histogram is all-zero despite n=300
+    assert r.should_offer_reroute is False
+
+
+def test_should_offer_reroute_true_when_typical_wait_exceeds_rush_threshold(conn, route_index):
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,  # a real RUSH_HOURS member
+        stat_type="delay",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}),
+        n_observations=200,
+    )
+    # Headway bin i=20 (min_s=0, bin_width=30) -> midpoint 615s (10.25
+    # min), well past RUSH_WAIT_THRESHOLD_SECONDS (7.5 min).
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [200.0 if i == 20 else 0.0 for i in range(81)]}),
+        n_observations=200,
+    )
+
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.typical_wait_seconds == 615.0
+    assert r.should_offer_reroute is True
 
 
 # --- ambiguous route_short_name (Gap 2) ----------------------------------
@@ -537,26 +608,53 @@ def test_ambiguous_route_short_name_is_insufficient(conn, route_index):
     assert results[0].p_miss is None
 
 
-# --- Monte Carlo miss condition, hand-computed bounds --------------------
+# --- p_miss / wait-time, hand-computed bounds (2026-10-12 redesign) ------
 
 
-def test_monte_carlo_p_miss_zero_when_buffer_never_blown():
+def test_p_miss_from_incoming_zero_when_buffer_never_blown():
     # All incoming offsets are exactly 0 (bin 0 midpoint of min_s=-15,
     # bin_width=30 -> -15 + 15 = 0); buffer is positive -> never blown.
     incoming_histogram = {"bin_width_s": 30, "min_s": -15, "counts": [1000.0] + [0.0] * 9}
-    outgoing_histogram = {"bin_width_s": 30, "min_s": 0, "counts": [1000.0] + [0.0] * 9}
-    p_miss = risk_engine._monte_carlo_p_miss(incoming_histogram, outgoing_histogram, buffer_seconds=60, draws=200)
+    p_miss = risk_engine._p_miss_from_incoming(incoming_histogram, buffer_seconds=60)
     assert p_miss == 0.0
 
 
-def test_monte_carlo_p_miss_one_when_incoming_far_exceeds_buffer_and_headway():
-    # Incoming offset always 2000s (a single bin); buffer=0 and headway
-    # always 15s -- the overrun (2000s) vastly exceeds the headway, so
-    # every draw is a genuine miss.
+def test_p_miss_from_incoming_one_when_incoming_always_exceeds_buffer():
+    # Incoming offset always 2000s (a single bin, midpoint 1985+15=2000);
+    # buffer=0 -> every real offset blows it -> p_miss is exactly 1.0,
+    # with no headway/outgoing data involved at all (the redesign's whole
+    # point: this is a pure function of the incoming distribution).
     incoming_histogram = {"bin_width_s": 30, "min_s": 1985, "counts": [1000.0]}
-    outgoing_histogram = {"bin_width_s": 30, "min_s": 0, "counts": [1000.0]}
-    p_miss = risk_engine._monte_carlo_p_miss(incoming_histogram, outgoing_histogram, buffer_seconds=0, draws=200)
+    p_miss = risk_engine._p_miss_from_incoming(incoming_histogram, buffer_seconds=0)
     assert p_miss == 1.0
+
+
+def test_p_miss_from_incoming_is_exact_fraction_past_buffer():
+    # Real HIST_CONFIG["delay"] shape (bin_width_s=30, min_s=-600, 101
+    # bins). Bin i's midpoint is -600 + 30*(i+0.5). i=20 -> 15s (under a
+    # 60s buffer, not a miss); i=100 (the clip bucket) -> 2415s (over the
+    # buffer, a miss). 400 observations under, 600 over -> exact fraction
+    # past the buffer, no Monte Carlo noise -- must be exactly 0.6.
+    counts = [0.0] * 101
+    counts[20] = 400.0
+    counts[100] = 600.0
+    incoming_histogram = {"bin_width_s": 30, "min_s": -600, "counts": counts}
+    p_miss = risk_engine._p_miss_from_incoming(incoming_histogram, buffer_seconds=60)
+    assert p_miss == 0.6
+
+
+def test_typical_wait_seconds_is_weighted_mean_of_headway_histogram():
+    # All weight on one bin (midpoint 135s, see min_s=0/bin_width=30/i=4)
+    # -> typical wait is exactly that midpoint.
+    outgoing_histogram = {"bin_width_s": 30, "min_s": 0, "counts": [0.0, 0.0, 0.0, 0.0, 200.0]}
+    assert risk_engine._typical_wait_seconds(outgoing_histogram) == 135.0
+
+
+def test_wait_threshold_seconds_rush_vs_nonrush():
+    assert risk_engine._wait_threshold_seconds("weekday", 8) == risk_engine.RUSH_WAIT_THRESHOLD_SECONDS
+    assert risk_engine._wait_threshold_seconds("weekday", 13) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
+    # Weekend never counts as rush, even at a rush-hour-shaped hour_bucket.
+    assert risk_engine._wait_threshold_seconds("weekend", 8) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
 
 
 # --- Gap 3 (bus direction) fallback: direction-agnostic combination ------

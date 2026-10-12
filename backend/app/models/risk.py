@@ -60,18 +60,40 @@ class ReliabilityBucket(BaseModel):
 
 class TransferRisk(BaseModel):
     """Per-transfer result from `get_risk` (Task 6) -- one entry per
-    transfer point in an itinerary, in itinerary order. `p_miss` and the
-    rest of the Monte Carlo output are only meaningful when
-    `quality == "ok"`; `quality == "insufficient"` always pairs with
-    `p_miss = None` -- never a fabricated/placeholder number (CLAUDE.md's
-    "LLM agents never compute numbers" rule extends to this function:
-    nothing downstream may mistake a placeholder for a real probability).
+    transfer point in an itinerary, in itinerary order.
+
+    2026-10-12 redesign (user-directed): `p_miss` and `typical_wait_seconds`
+    are two separate, INDEPENDENTLY-gated signals, not one compound number:
+
+    - `p_miss` answers "did you catch the specific vehicle OTP planned for
+      you" -- computed purely from the INCOMING leg's delay/prediction-error
+      distribution vs. the planned transfer buffer. Gated on the incoming
+      bucket's own n_observations alone. `quality == "ok"` pairs with a
+      real `p_miss`; `quality == "insufficient"` always pairs with
+      `p_miss = None` -- never a fabricated/placeholder number (CLAUDE.md's
+      "LLM agents never compute numbers" rule extends to this function).
+    - `typical_wait_seconds` answers "if you do miss it, how long do you
+      wait for the next one" -- computed from the OUTGOING leg's headway
+      distribution. Gated on the outgoing bucket's own n_observations,
+      independent of whether `quality` is "ok". `None` when that bucket is
+      insufficient, same never-fabricate discipline.
+    - `should_offer_reroute` is a plain threshold comparison on
+      `typical_wait_seconds` (see risk_engine.RUSH_WAIT_THRESHOLD_SECONDS /
+      NONRUSH_WAIT_THRESHOLD_SECONDS) -- always `False` when
+      `typical_wait_seconds` is `None`.
+
+    These two signals are meant to always be narrated together when both
+    are available (e.g. "55% chance of missing it, but the next one comes
+    in 4 minutes") -- a bare miss percentage without the wait-time context
+    can read as more alarming than it should on a high-frequency route.
     """
 
     from_route: str  # OTP-visible short name, e.g. "F" or "Q70-SBS" -- for narration only
     to_route: str
     transfer_stop_name: str  # human-readable, e.g. "Roosevelt Island"
     p_miss: float | None
-    n: float  # min(n_observations) across the required buckets; 0 if a bucket was missing
+    n: float  # incoming leg's bucket n_observations -- the bucket p_miss is computed from; 0 if missing
     window_days: int
     quality: Literal["ok", "insufficient"]
+    typical_wait_seconds: float | None = None
+    should_offer_reroute: bool = False
