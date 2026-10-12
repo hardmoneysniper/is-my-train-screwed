@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -69,43 +68,34 @@ async def _run_monitor_loop():
 # automatically, with zero change to the collector's own logic.
 BUS_COLLECTOR_RESTART_DELAY_S = 5
 
-# 2026-10-05 (user): every remaining corridor is already well past its
-# weekday target (114%-293%) -- only weekend data is still needed for
-# any of them. Collecting more weekday data now serves nobody, so the
-# collector only runs on weekends; _is_weekend() checks UTC (matching
-# how collected files get dated/bucketed elsewhere in this project --
-# _rotated_path uses datetime.now(timezone.utc), and day_type_for buckets
-# by that same date, so using UTC here keeps "is this weekend data"
-# consistent with how it's later bucketed, not local machine time).
-BUS_COLLECTOR_WEEKDAY_CHECK_INTERVAL_S = 60 * 60
-
-
-def _is_weekend() -> bool:
-    return datetime.now(timezone.utc).weekday() >= 5  # Sat=5, Sun=6
+# 2026-10-05 (user): added a weekend-only pause here on the premise that
+# every remaining corridor had already cleared its weekday target.
+# 2026-10-12 REVERTED (see CLAUDE.md's "Transfer-risk model redesign +
+# bus collection-target retirement" section): that premise was the same
+# raw-record-count proxy later measured wrong by ~17.4x -- real
+# reliability_buckets coverage (scripts/hourly_bus_sync.py's
+# real_bucket_coverage()) shows every corridor well under the 90%
+# completion fraction on BOTH weekday and weekend, so pausing weekday
+# collection was serving nobody. The collector now runs continuously
+# again; hourly_bus_sync.py's real coverage check is what actually
+# decides when to stop, not a day-of-week gate here.
 
 
 async def _run_bus_collector_loop():
     """run_forever() already retries internally on every transient
     failure (network errors, unexpected exceptions -- see its own
     backoff loop) and essentially never raises under normal operation.
-    This wrapper exists for two things that make it return/raise: a
+    This wrapper exists for the one thing that makes it return/raise: a
     missing MTA_BUSTIME_API_KEY (raises, checked once before its while
-    True even starts) and _is_weekend() turning False mid-poll (returns
-    cleanly, checked once per ~60s poll cycle inside run_forever itself).
-    While it's not weekend, this loop doesn't even call run_forever --
-    it just re-checks hourly. Restarts/resumes with a short fixed delay
-    (not the 24h aggregation cadence) since both a crashed poller and a
-    freshly-started weekend should come back fast."""
+    True even starts). Restarts with a short fixed delay (not the 24h
+    aggregation cadence) since a crashed poller should come back fast."""
     while True:
-        if not _is_weekend():
-            await asyncio.sleep(BUS_COLLECTOR_WEEKDAY_CHECK_INTERVAL_S)
-            continue
         try:
             # Blocking, long-running I/O (its own internal time.sleep
             # polling loop) -- hand it to a worker thread so it never
             # stalls /chat or /trip/plan requests being served
             # concurrently.
-            await asyncio.to_thread(run_forever, _is_weekend)
+            await asyncio.to_thread(run_forever)
         except Exception:
             logging.exception("bus collector loop failed")
         await asyncio.sleep(BUS_COLLECTOR_RESTART_DELAY_S)

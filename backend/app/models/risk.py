@@ -77,10 +77,12 @@ class TransferRisk(BaseModel):
       distribution. Gated on the outgoing bucket's own n_observations,
       independent of whether `quality` is "ok". `None` when that bucket is
       insufficient, same never-fabricate discipline.
-    - `should_offer_reroute` is a plain threshold comparison on
-      `typical_wait_seconds` (see risk_engine.RUSH_WAIT_THRESHOLD_SECONDS /
-      NONRUSH_WAIT_THRESHOLD_SECONDS) -- always `False` when
-      `typical_wait_seconds` is `None`.
+    - `should_offer_reroute` has no magnitude threshold (2026-10-12, user:
+      "avoid the gate at all") -- it's simply whether `typical_wait_seconds`
+      is citable at all (`True` whenever it's not `None`). The agent always
+      asks the rider if they want a faster route calculated whenever a wait
+      time is citable, no matter how short or long; it's the rider's call,
+      not a hardcoded cutoff.
 
     These two signals are meant to always be narrated together when both
     are available (e.g. "55% chance of missing it, but the next one comes

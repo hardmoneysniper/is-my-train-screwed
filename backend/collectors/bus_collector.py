@@ -31,33 +31,29 @@ from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q102", "Q72", "Q80", "Q90"]  # spec §2 seed set +
+CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
 # picked over Q06/Q07 which serve JFK's cargo area rather than passenger
 # terminals). Roosevelt Island Tram is static-schedule, not collected here.
 #
-# 2026-10-01 (user): "stop a route when you think there is enough data for
-# it" -- per-route stopping, not all-or-nothing. Q70+ and M60+ removed here
-# (no longer polled -- run_forever()'s own route_id filter just skips
-# anything not in this list) after real cumulative local data cleared their
-# targets by 2.6x-10.5x (see scripts/hourly_bus_sync.py's
-# BUS_COLLECTION_TARGETS for the real per-route targets and the standing
-# instruction to keep doing this during periodic checks). Their real stop
-# counts (Q70+=7, M60+=38) and derived targets stay in that file for
-# reference even though they're no longer actively collected.
+# 2026-10-01 through 2026-10-10: every route above (Q70+/M60+ on 10-01,
+# B15/Q3/Q10 on 10-04, Q102/Q72/Q80 on 10-10) was removed from this list in
+# turn as each individually cleared a "stop collecting" target derived from
+# raw 30s-poll record counts via an assumed ~1:1 raw-record-to-observation
+# ratio (see scripts/hourly_bus_sync.py's BUS_COLLECTION_TARGETS).
 #
-# 2026-10-04: B15 removed too, after real cumulative local data cleared
-# both its weekday (437%) and weekend (113%) targets following the first
-# full weekend since it started collecting. Q3 (340%/100%) and Q10
-# (340%/103%) also removed same day once the next periodic check showed
-# both clearing their targets.
-#
-# 2026-10-10: Q102 (weekday 264%/weekend 116%), Q72 (255%/106%), and Q80
-# (299%/150%) all removed after the first full weekend following the
-# 2nd-priority LGA/JFK corridors being added -- only Q90 (130%/80%) is
-# still short on weekend data.
+# 2026-10-11 (user): that ratio was wrong by ~17.4x, measured directly on
+# Q90's busiest bucket (365 raw records -> 21 real reliability_buckets
+# observations) -- every one of the "cleared" routes above had actually
+# cleared a target ~17x too low, so none of these per-route stop decisions
+# can be trusted. All 9 routes restored to active collection (user,
+# 2026-10-12: "keep collecting for all bus routes that is/was being
+# collected"). Per-route stopping now goes through hourly_bus_sync.py's
+# real_bucket_coverage() (direct reliability_buckets measurement against
+# MIN_N_OBSERVATIONS, not a raw-record proxy) before any route is removed
+# from this list again.
 #
 # Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
 # Q70+/M60+ (checked directly, not assumed from that pattern; not every route

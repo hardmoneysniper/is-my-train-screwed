@@ -225,10 +225,9 @@ def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index)
     assert r.n == 200
     assert r.window_days == 20  # window_start is far enough in the past to hit the 20-day cap
     # Outgoing headway histogram's one weighted bin has midpoint 135s
-    # (min_s=0, bin_width=30, i=4 -> 0+30*4.5=135); well under the
-    # weekday-hour-8 rush threshold (450s), so no reroute offer.
+    # (min_s=0, bin_width=30, i=4 -> 0+30*4.5=135).
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is False
+    assert r.should_offer_reroute is True
 
 
 def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficient(conn, route_index):
@@ -302,7 +301,7 @@ def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficien
     # independently gated from the incoming one -- typical_wait_seconds
     # must still populate even though the miss percentage can't.
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is False
+    assert r.should_offer_reroute is True
 
 
 def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_index):
@@ -375,7 +374,7 @@ def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_
     # Same independent-gating point as the subway test above, mirrored for
     # the bus-incoming case.
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is False
+    assert r.should_offer_reroute is True
 
 
 def test_incoming_stat_type_is_agency_dependent():
@@ -528,9 +527,7 @@ def _insert_reroute_test_buckets(conn):
         histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}),
         n_observations=200,
     )
-    # Headway bin i=20 (min_s=0, bin_width=30) -> midpoint 615s (10.25
-    # min) -- past RUSH_WAIT_THRESHOLD_SECONDS (7.5 min) but under
-    # NONRUSH_WAIT_THRESHOLD_SECONDS (15 min).
+    # Headway bin i=20 (min_s=0, bin_width=30) -> midpoint 615s (10.25 min).
     _insert_bucket(
         conn,
         agency="subway",
@@ -544,29 +541,17 @@ def _insert_reroute_test_buckets(conn):
     )
 
 
-def test_should_offer_reroute_true_when_user_in_a_rush_and_wait_exceeds_rush_threshold(conn, route_index):
+def test_should_offer_reroute_is_true_whenever_typical_wait_seconds_is_citable(conn, route_index):
+    # 2026-10-12 (user): "avoid the gate at all" -- no minute threshold,
+    # no rush/non-rush distinction. should_offer_reroute is simply whether
+    # a real typical_wait_seconds exists, regardless of its magnitude.
     _insert_reroute_test_buckets(conn)
-    results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index, is_rush=True)
+    results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index)
 
     assert len(results) == 1
     r = results[0]
     assert r.typical_wait_seconds == 615.0
     assert r.should_offer_reroute is True
-
-
-def test_should_offer_reroute_false_when_user_not_in_a_rush_even_at_the_same_hour(conn, route_index):
-    # 2026-10-12 (user): the exact same transfer, SAME hour_bucket=8 (a
-    # real rush hour), SAME 615s wait -- the only thing that changed is
-    # is_rush. Proves the decision is about the user's stated urgency, not
-    # the wall clock: a rider not in a rush at 8am still gets the more
-    # patient 15-min bar, where 615s doesn't clear it.
-    _insert_reroute_test_buckets(conn)
-    results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index, is_rush=False)
-
-    assert len(results) == 1
-    r = results[0]
-    assert r.typical_wait_seconds == 615.0
-    assert r.should_offer_reroute is False
 
 
 # --- ambiguous route_short_name (Gap 2) ----------------------------------
@@ -669,11 +654,6 @@ def test_typical_wait_seconds_is_weighted_mean_of_headway_histogram():
     # -> typical wait is exactly that midpoint.
     outgoing_histogram = {"bin_width_s": 30, "min_s": 0, "counts": [0.0, 0.0, 0.0, 0.0, 200.0]}
     assert risk_engine._typical_wait_seconds(outgoing_histogram) == 135.0
-
-
-def test_wait_threshold_seconds_reflects_user_urgency_not_the_clock():
-    assert risk_engine._wait_threshold_seconds(is_rush=True) == risk_engine.RUSH_WAIT_THRESHOLD_SECONDS
-    assert risk_engine._wait_threshold_seconds(is_rush=False) == risk_engine.NONRUSH_WAIT_THRESHOLD_SECONDS
 
 
 # --- Gap 3 (bus direction) fallback: direction-agnostic combination ------

@@ -29,13 +29,7 @@ CITATION_FOOTER_TEMPLATE = "*Based on {n} observed patterns in the last {window_
 SYSTEM_PROMPT = (
     "You are a NYC transit trip advisor. You never invent routes, durations, "
     "or probabilities — always call plan_route and narrate its exact result. "
-    "After planning a route, call get_risk to check its transfers. Set its "
-    "user_in_a_rush input to true only if THIS conversation signals real "
-    "urgency for THIS trip right now — a stated deadline, 'I'm late', "
-    "'I need to hurry', a flight/appointment they're tight on time for — "
-    "the same signal that later decides whether to offer monitoring, not "
-    "the time of day; default it to false (omit it) when nothing in the "
-    "conversation signals urgency. If it "
+    "After planning a route, call get_risk to check its transfers. If it "
     "returns an empty list, there's no transfer to discuss. If it returns "
     "entries, narrate each using its exact p_miss/n/window_days; if an "
     "entry's quality is 'insufficient', say reliability data isn't "
@@ -89,19 +83,22 @@ SYSTEM_PROMPT = (
     "the percentage (never the percentage alone when a wait time exists — "
     "a bare miss percentage reads scarier than it should without knowing "
     "how long the next option actually takes), convert it from seconds to "
-    "whole minutes for the user, and if should_offer_reroute is true, end "
-    "by asking whether they'd like a faster route calculated instead — "
-    "never calculate or suggest one unprompted. If typical_wait_seconds is "
-    "null, say nothing about wait time; don't guess it.\n"
+    "whole minutes for the user, and always end by asking whether they'd "
+    "like a faster route calculated instead — there is no minute threshold "
+    "gating this, ask every time a wait time is citable, no matter how "
+    "short or long it is, and never calculate or suggest a faster route "
+    "unprompted. If typical_wait_seconds is null, say nothing about wait "
+    "time; don't guess it.\n"
     "Example — get_risk returns {p_miss: 0.55, n: 400, window_days: 20, "
-    "quality: 'ok', typical_wait_seconds: 480, should_offer_reroute: true}: "
+    "quality: 'ok', typical_wait_seconds: 480}: "
     "\"There's about a 55%* chance of missing that transfer, but your next "
     "option typically arrives in 8 minutes — want me to calculate a faster "
     "route instead?\\n*Based on 400 observed patterns in the last 20 "
     "days.*\" Example — quality 'insufficient' but typical_wait_seconds: "
-    "300, should_offer_reroute: false: \"I don't have enough reliability "
-    "data for that transfer yet, but your next option typically arrives in "
-    "5 minutes.\" (no footer, since quality isn't 'ok').\n\n"
+    "300: \"I don't have enough reliability data for that transfer yet, "
+    "but your next option typically arrives in 5 minutes — want me to "
+    "calculate a faster route instead?\" (no footer, since quality isn't "
+    "'ok').\n\n"
     "Monitoring a trip: after checking get_risk, if any entry has quality \"ok\"\n"
     "(any real percentage, however small), or the trip sounds deadline-sensitive\n"
     "(the user mentions a flight, interview, appointment, or says they're short\n"
@@ -199,8 +196,7 @@ class ConversationAgent:
         if not (0 <= itinerary_index < len(last_itineraries)):
             return json.dumps({"error": "no itinerary available yet — call plan_route first"})
         itinerary = last_itineraries[itinerary_index]
-        is_rush = bool(tool_input.get("user_in_a_rush", False))
-        risks = risk_engine.get_risk(itinerary, is_rush=is_rush)
+        risks = risk_engine.get_risk(itinerary)
         return json.dumps([r.model_dump() for r in risks])
 
     def _handle_create_monitored_trip(
