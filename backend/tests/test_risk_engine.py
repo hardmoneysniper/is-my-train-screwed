@@ -435,7 +435,7 @@ def test_low_n_bucket_returns_insufficient(conn, route_index):
         day_type="weekday",
         hour_bucket=8,
         stat_type="delay",  # subway incoming leg reads "delay", not "prediction_error"
-        n_observations=50,  # below the n=200 threshold
+        n_observations=10,  # below the n=50 threshold
     )
     # n=300 clears the threshold, but an all-zero histogram is just as "no
     # real signal" -- must still degrade typical_wait_seconds to None, not
@@ -483,7 +483,7 @@ def test_low_n_bucket_returns_insufficient(conn, route_index):
     r = results[0]
     assert r.quality == "insufficient"
     assert r.p_miss is None
-    assert r.n == 50  # incoming bucket's own n_observations
+    assert r.n == 10  # incoming bucket's own n_observations
     assert r.typical_wait_seconds is None  # outgoing bucket's histogram is all-zero despite n=300
     assert r.should_offer_reroute is False
 

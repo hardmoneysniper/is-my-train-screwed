@@ -305,8 +305,8 @@ def test_leg_with_insufficient_n_observations_returns_none(conn, route_index):
         day_type="weekday",
         hour_bucket=8,
         stat_type="delay",
-        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [50.0 if i == 20 else 0.0 for i in range(101)]}),
-        n_observations=50,  # below risk_engine.MIN_N_OBSERVATIONS (200)
+        histogram=json.dumps({"bin_width_s": 30, "min_s": -600, "counts": [10.0 if i == 20 else 0.0 for i in range(101)]}),
+        n_observations=10,  # below risk_engine.MIN_N_OBSERVATIONS (50)
     )
 
     end = _local_ms(2026, 8, 24, 8, 10, 0)
@@ -320,7 +320,7 @@ def test_leg_with_insufficient_n_observations_returns_none(conn, route_index):
     deadline_ts = end + 3600_000
     result = compute_deadline_threshold(itinerary, deadline_ts, conn=conn, route_index=route_index)
     assert result is None
-    assert 50 < risk_engine.MIN_N_OBSERVATIONS
+    assert 10 < risk_engine.MIN_N_OBSERVATIONS
 
 
 # --- percentile boundary: cumulative == 0.85*total exactly -----------------

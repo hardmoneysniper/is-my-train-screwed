@@ -4,11 +4,12 @@
 deliverable of Phase 2 (see `.superpowers/sdd/task-6-brief.md`). Pure
 function, no LLM calls: finds every transfer point in an `Itinerary`,
 pulls the incoming-arrival and outgoing-headway distributions from
-`reliability_buckets`, and Monte Carlo samples a miss probability. Never
-fabricates a number -- CLAUDE.md's "LLM agents never compute numbers"
-rule extends here too: any transfer whose required bucket is missing or
-under n=200 gets `quality="insufficient"` and `p_miss=None`, with the
-Monte Carlo never run.
+`reliability_buckets`, and computes a miss probability exactly from the
+real observed data (see _p_miss_from_incoming's docstring for the
+2026-10-12 redesign). Never fabricates a number -- CLAUDE.md's "LLM
+agents never compute numbers" rule extends here too: a bucket missing or
+under MIN_N_OBSERVATIONS gets `quality="insufficient"` and `p_miss=None`,
+computed from nothing.
 
 Gap resolutions (see the brief for full rationale -- these are binding
 decisions, not arbitrary choices made while coding):
@@ -55,7 +56,17 @@ from db import get_connection
 
 LOCAL_TZ = ZoneInfo("America/New_York")
 
-MIN_N_OBSERVATIONS = 200
+MIN_N_OBSERVATIONS = 50
+# 2026-10-12 (user): lowered from 200. With p_miss now a single-
+# distribution exact calculation (not a compound two-distribution Monte
+# Carlo estimate), 200 real observations isn't needed for a defensible
+# percentage -- n=50 still reliably surfaces a 5%+ true miss rate (~92%
+# chance of seeing at least one such event in 50 real trials:
+# 1 - 0.95**50 ≈ 0.92), while being achievable in weeks rather than
+# months for lower-frequency routes/hours. The underlying histograms are
+# still built entirely from real observed incoming/outgoing trips --
+# lowering the threshold doesn't change what's real about the data, only
+# how much of it is required before citing a number from it.
 # Freshness cap for citations (task-6-brief.md step 6): a transfer-risk
 # citation never claims to reflect more than this many days of history,
 # even once real collection has run far longer -- transit patterns and
