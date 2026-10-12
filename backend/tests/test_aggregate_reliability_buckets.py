@@ -201,6 +201,75 @@ def test_bus_day_produces_zero_delay_buckets_but_other_stats_populate(conn, monk
     assert total_delay_buckets == 0
 
 
+def test_bus_weekend_event_merges_into_weekday_bucket_when_schedule_equivalent(conn, monkeypatch):
+    # 2026-10-12: a bus route whose real schedule doesn't distinguish
+    # weekday from weekend at this hour (e.g. B15's real night service)
+    # must fold both day types' observations into ONE bucket, keyed
+    # "weekday" -- not split into two separate, each-half-as-full buckets.
+    monkeypatch.setattr(
+        bus_schedule_periods, "effective_day_type_and_hour",
+        lambda route_id, day_type, hour: ("weekday", hour),
+    )
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="B15",
+        stop_id="900001",
+        vehicle_id="MTABC_1",
+        delay_seconds=None,
+        day_type="weekday",
+        hour_bucket=2,
+        service_date=date(2026, 8, 24),  # a real Monday
+        observed_arrival_ts=datetime(2026, 8, 24, 2, 0, 0, tzinfo=timezone.utc),
+    )
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="B15",
+        stop_id="900001",
+        vehicle_id="MTABC_2",
+        delay_seconds=None,
+        day_type="weekday",
+        hour_bucket=2,
+        service_date=date(2026, 8, 24),
+        observed_arrival_ts=datetime(2026, 8, 24, 2, 20, 0, tzinfo=timezone.utc),
+    )
+    run_aggregate(conn)
+
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="B15",
+        stop_id="900001",
+        vehicle_id="MTABC_3",
+        delay_seconds=None,
+        day_type="weekend",
+        hour_bucket=2,
+        service_date=date(2026, 8, 29),  # a real Saturday
+        observed_arrival_ts=datetime(2026, 8, 29, 2, 0, 0, tzinfo=timezone.utc),
+    )
+    _insert_event(
+        conn,
+        agency="bus",
+        route_id="B15",
+        stop_id="900001",
+        vehicle_id="MTABC_4",
+        delay_seconds=None,
+        day_type="weekend",
+        hour_bucket=2,
+        service_date=date(2026, 8, 29),
+        observed_arrival_ts=datetime(2026, 8, 29, 2, 20, 0, tzinfo=timezone.utc),
+    )
+    run_aggregate(conn)
+
+    weekday_bucket = _get_bucket(conn, "bus", "B15", "900001", "N", "weekday", 2, "headway")
+    weekend_bucket = _get_bucket(conn, "bus", "B15", "900001", "N", "weekend", 2, "headway")
+    assert weekend_bucket is None  # no separate row was ever created
+    assert weekday_bucket is not None
+    # Both days' headway observations landed in the one merged bucket.
+    assert weekday_bucket["n_observations"] == 2
+
+
 def test_bus_bucket_key_uses_real_period_mapping_subway_stays_literal(conn, monkeypatch):
     # A real (non-identity) mapping: hour 8 collapses into period-hour 5
     # for bus, confirming the fold genuinely routes through

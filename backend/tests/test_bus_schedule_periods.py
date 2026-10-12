@@ -153,6 +153,93 @@ def test_scheduled_headway_skips_a_zip_where_the_route_has_zero_real_trips(tmp_p
     assert headway == {8: 10.0}
 
 
+# --- effective_day_type_and_hour: weekend/weekday merge ------------------
+
+
+def _write_bus_gtfs_zip_both_day_types(path, route_id: str, weekday_departure_times: list[str], weekend_departure_times: list[str]):
+    """Like _write_bus_gtfs_zip but with separate weekday (WKD) and
+    weekend (WKE) services, both for the same route/stop -- lets tests
+    control weekday vs. weekend schedules independently."""
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("routes.txt", f"route_id,route_short_name,route_long_name,route_type\n{route_id},{route_id},,3\n")
+        z.writestr(
+            "calendar.txt",
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "WKD,1,1,1,1,1,0,0,20260101,20261231\n"
+            "WKE,0,0,0,0,0,1,1,20260101,20261231\n",
+        )
+        trip_lines = ["trip_id,route_id,service_id,direction_id"]
+        stop_time_lines = ["trip_id,arrival_time,departure_time,stop_id,stop_sequence"]
+        for i, dep_time in enumerate(weekday_departure_times):
+            trip_id = f"WD{i}"
+            trip_lines.append(f"{trip_id},{route_id},WKD,0")
+            stop_time_lines.append(f"{trip_id},{dep_time},{dep_time},REP_STOP,1")
+        for i, dep_time in enumerate(weekend_departure_times):
+            trip_id = f"WE{i}"
+            trip_lines.append(f"{trip_id},{route_id},WKE,0")
+            stop_time_lines.append(f"{trip_id},{dep_time},{dep_time},REP_STOP,1")
+        z.writestr("trips.txt", "\n".join(trip_lines))
+        z.writestr("stop_times.txt", "\n".join(stop_time_lines))
+
+
+def test_headways_equivalent_within_tolerance():
+    assert bus_schedule_periods._headways_equivalent(20.0, 20.0) is True
+    assert bus_schedule_periods._headways_equivalent(20.0, 25.0) is True  # 20% change
+    assert bus_schedule_periods._headways_equivalent(20.0, 30.0) is False  # 50% change
+
+
+def test_effective_day_type_and_hour_merges_weekend_into_weekday_when_headways_match(tmp_path, monkeypatch):
+    # Same 20-min headway on both day types at hour 2 -- a real night
+    # period where the schedule genuinely doesn't distinguish weekday
+    # from weekend (the B15 case: 23 of 24 hours equivalent in real data).
+    zip_path = tmp_path / "bus.zip"
+    _write_bus_gtfs_zip_both_day_types(
+        zip_path, "T1",
+        weekday_departure_times=["02:00:00", "02:20:00", "02:40:00"],
+        weekend_departure_times=["02:00:00", "02:20:00", "02:40:00"],
+    )
+    monkeypatch.setattr(bus_schedule_periods, "GTFS_DIR", tmp_path)
+    monkeypatch.setattr(bus_schedule_periods, "BUS_ZIP_NAMES", ["bus.zip"])
+
+    day_type, hour = bus_schedule_periods.effective_day_type_and_hour("T1", "weekend", 2)
+    assert day_type == "weekday"
+    assert hour == bus_schedule_periods.period_hour_for("T1", "weekday", 2)
+    # weekday input is never remapped -- it's already the canonical side.
+    assert bus_schedule_periods.effective_day_type_and_hour("T1", "weekday", 2) == ("weekday", hour)
+
+
+def test_effective_day_type_and_hour_keeps_them_separate_when_headways_differ(tmp_path, monkeypatch):
+    # Rush-hour weekday (5 min) vs. a much sparser weekend (30 min) at the
+    # same hour -- genuinely different schedules, must NOT merge.
+    zip_path = tmp_path / "bus.zip"
+    _write_bus_gtfs_zip_both_day_types(
+        zip_path, "T1",
+        weekday_departure_times=["08:00:00", "08:05:00", "08:10:00"],
+        weekend_departure_times=["08:00:00", "08:30:00", "09:00:00"],
+    )
+    monkeypatch.setattr(bus_schedule_periods, "GTFS_DIR", tmp_path)
+    monkeypatch.setattr(bus_schedule_periods, "BUS_ZIP_NAMES", ["bus.zip"])
+
+    day_type, hour = bus_schedule_periods.effective_day_type_and_hour("T1", "weekend", 8)
+    assert day_type == "weekend"
+    assert hour == bus_schedule_periods.period_hour_for("T1", "weekend", 8)
+
+
+def test_effective_day_type_and_hour_falls_back_when_one_side_has_no_schedule_evidence(tmp_path, monkeypatch):
+    # No weekend service at all for this route -- nothing to compare
+    # against, must never guess a merge.
+    zip_path = tmp_path / "bus.zip"
+    _write_bus_gtfs_zip_both_day_types(
+        zip_path, "T1",
+        weekday_departure_times=["08:00:00", "08:10:00"],
+        weekend_departure_times=[],
+    )
+    monkeypatch.setattr(bus_schedule_periods, "GTFS_DIR", tmp_path)
+    monkeypatch.setattr(bus_schedule_periods, "BUS_ZIP_NAMES", ["bus.zip"])
+
+    assert bus_schedule_periods.effective_day_type_and_hour("T1", "weekend", 8) == ("weekend", 8)
+
+
 def test_period_hour_for_caches_per_route_and_day_type(tmp_path, monkeypatch):
     zip_path = tmp_path / "bus.zip"
     _write_bus_gtfs_zip(zip_path, "T1", ["08:00:00", "08:10:00"])

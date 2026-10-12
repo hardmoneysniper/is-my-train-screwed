@@ -554,6 +554,71 @@ def test_should_offer_reroute_is_true_whenever_typical_wait_seconds_is_citable(c
     assert r.should_offer_reroute is True
 
 
+# --- bus weekend/weekday bucket merge (2026-10-12) -----------------------
+
+
+def test_bus_weekend_transfer_reads_the_merged_weekday_bucket(conn, route_index, monkeypatch):
+    # 2026-10-12 (user): when a bus route's real schedule doesn't
+    # distinguish weekday from weekend at this hour, aggregation folds
+    # both into ONE bucket keyed "weekday" (see
+    # test_aggregate_reliability_buckets.py's merge test). A lookup for a
+    # transfer that actually happened on a real Saturday must still find
+    # that merged bucket -- proving get_risk's read path maps through the
+    # same effective_day_type_and_hour, not just the write path.
+    monkeypatch.setattr(
+        risk_engine.bus_schedule_periods, "effective_day_type_and_hour",
+        lambda route_id, day_type, hour: ("weekday", hour),
+    )
+    _insert_bucket(
+        conn,
+        agency="bus",
+        route_id="Q102",
+        stop_id="450154",
+        direction="0",
+        day_type="weekday",  # the merged key -- never a "weekend" row
+        hour_bucket=8,
+        stat_type="prediction_error",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+
+    itinerary = Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="BUS",
+                route_short_name="Q102",
+                from_stop_id="MTABC:400000",
+                from_stop_name="Start",
+                to_stop_id="MTABC:450154",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 29, 8, 0, 0),  # a real Saturday
+                end_time_ms=_local_ms(2026, 8, 29, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 29, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 29, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.p_miss is not None
+    assert r.n == 200
+
+
 # --- ambiguous route_short_name (Gap 2) ----------------------------------
 
 

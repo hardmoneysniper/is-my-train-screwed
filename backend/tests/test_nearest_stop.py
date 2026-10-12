@@ -66,6 +66,21 @@ def test_find_by_name_zero_matches_returns_empty_list():
     assert result == []
 
 
+def test_find_by_name_ignores_punctuation_differences():
+    # Real gap (2026-10-12): a plain substring check rejects this purely
+    # because "/" breaks character-for-character contiguity, even though
+    # the rider typed the same three real words as the GTFS name.
+    index = _make_index("Lexington Av/63 St", "Roosevelt Island")
+    result = index.find_by_name("Lexington Av 63")
+    assert [s["stop_name"] for s in result] == ["Lexington Av/63 St"]
+
+
+def test_find_by_name_still_requires_the_words_to_actually_appear():
+    index = _make_index("Lexington Av/63 St", "Roosevelt Island")
+    result = index.find_by_name("Lexington Av 64")
+    assert result == []
+
+
 def _write_stops_zip(zip_path, rows):
     csv_lines = ["stop_id,stop_name,stop_lat,stop_lon"]
     for stop_id, stop_name, lat, lon in rows:

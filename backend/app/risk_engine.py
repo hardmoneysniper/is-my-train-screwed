@@ -298,16 +298,25 @@ def _compute_transfer_risk(
     # path below.
 
     # 2026-10-12 (user): bus buckets are keyed by real scheduled-headway
-    # period, not literal hour-of-day (see app/bus_schedule_periods.py
-    # and aggregate_reliability_buckets.py's _effective_hour_bucket,
-    # which wrote them this way) -- a bus-side lookup must map through
-    # the SAME function or it will miss real buckets. Subway is
-    # unaffected, same literal hour_bucket as always.
-    hour_bucket_i = bus_schedule_periods.period_hour_for(route_id_i, day_type, hour_bucket) if agency_i == "bus" else hour_bucket
-    hour_bucket_j = bus_schedule_periods.period_hour_for(route_id_j, day_type, hour_bucket) if agency_j == "bus" else hour_bucket
+    # period, not literal hour-of-day, AND weekend is folded into weekday
+    # wherever a route's real schedule doesn't distinguish them (see
+    # app/bus_schedule_periods.py and aggregate_reliability_buckets.py's
+    # _effective_day_type_and_hour, which wrote them this way) -- a
+    # bus-side lookup must map through the SAME function per route (each
+    # route's equivalence pattern is its own) or it will miss real
+    # buckets. Subway is unaffected, same literal day_type/hour_bucket as
+    # always.
+    day_type_i, hour_bucket_i = (
+        bus_schedule_periods.effective_day_type_and_hour(route_id_i, day_type, hour_bucket)
+        if agency_i == "bus" else (day_type, hour_bucket)
+    )
+    day_type_j, hour_bucket_j = (
+        bus_schedule_periods.effective_day_type_and_hour(route_id_j, day_type, hour_bucket)
+        if agency_j == "bus" else (day_type, hour_bucket)
+    )
 
-    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type, hour_bucket_i, _incoming_stat_type(agency_i))
-    outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type, hour_bucket_j, "headway")
+    incoming = _fetch_bucket(conn, agency_i, route_id_i, stop_id_i, day_type_i, hour_bucket_i, _incoming_stat_type(agency_i))
+    outgoing = _fetch_bucket(conn, agency_j, route_id_j, stop_id_j, day_type_j, hour_bucket_j, "headway")
 
     # 2026-10-12 redesign: the miss percentage (quality/p_miss/n/window_days)
     # and the wait-time/reroute-offer signal are independently gated, each

@@ -1,6 +1,7 @@
 import csv
 import io
 import pathlib
+import re
 import zipfile
 from rtree import index as rtree_index
 from shapely.geometry import Point
@@ -15,6 +16,20 @@ import pyproj
 # wrong. Not agency-agnostic beyond the NYC area; revisit if stops.txt ever
 # covers a wider region than the MTA network.
 _TO_METERS = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:32618", always_xy=True).transform
+
+# find_by_name gap (2026-10-12, user): a literal substring check rejects
+# "Lexington Av 63" against the real GTFS name "Lexington Av/63 St" purely
+# because "/" breaks character-for-character contiguity -- the rider typed
+# the same three real words. Collapsing every run of non-alphanumeric
+# characters (punctuation, slashes, extra spaces) to a single space before
+# comparing fixes exactly that, with no edit-distance/probabilistic fuzzy
+# matching involved -- still a deterministic, never-guess substring check,
+# just one that ignores punctuation differences that carry no real meaning.
+_NON_ALNUM = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_for_search(s: str) -> str:
+    return _NON_ALNUM.sub(" ", s.lower()).strip()
 
 
 class StopIndex:
@@ -68,10 +83,12 @@ class StopIndex:
 
     def find_by_name(self, query: str, limit: int = 20) -> list[dict]:
         """Case-insensitive substring match of query against stop_name,
-        sorted alphabetically by stop_name, capped at limit. No fuzzy
-        matching or relevance ranking."""
-        query_lower = query.lower()
-        matches = [s for s in self._stops if query_lower in s["stop_name"].lower()]
+        ignoring punctuation/spacing differences (see _normalize_for_search
+        -- e.g. "Lexington Av 63" matches "Lexington Av/63 St"), sorted
+        alphabetically by stop_name, capped at limit. Still a plain
+        substring check, not edit-distance/probabilistic fuzzy matching."""
+        query_norm = _normalize_for_search(query)
+        matches = [s for s in self._stops if query_norm in _normalize_for_search(s["stop_name"])]
         matches.sort(key=lambda s: s["stop_name"])
         return matches[:limit]
 

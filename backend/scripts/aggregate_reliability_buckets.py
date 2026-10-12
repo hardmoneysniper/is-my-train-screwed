@@ -101,16 +101,21 @@ def _fetch_events(conn, agency: str, service_date: date) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _effective_hour_bucket(e: dict) -> int:
+def _effective_day_type_and_hour(e: dict) -> tuple[str, int]:
     """2026-10-12 (user): bus buckets are keyed by real SCHEDULED-headway
     period, not literal hour-of-day (real data showed no universal rush/
     midday/night split works across routes -- see
-    app/bus_schedule_periods.py's module docstring). Subway is unchanged
-    -- it already has sufficient per-hour n coverage, and re-bucketing it
-    would just needlessly reshuffle already-working data."""
+    app/bus_schedule_periods.py's module docstring), AND weekend is
+    folded into weekday for any hour where the two day types' real
+    schedules are equivalent (same module, effective_day_type_and_hour --
+    e.g. B15 shares the same headway on 23 of its 24 hours, so splitting
+    those by day_type was needlessly doubling the real-world days needed
+    per bucket). Subway is unchanged -- it already has sufficient per-
+    hour n coverage, and re-bucketing it would just needlessly reshuffle
+    already-working data."""
     if e["agency"] != "bus":
-        return e["hour_bucket"]
-    return bus_schedule_periods.period_hour_for(e["route_id"], e["day_type"], e["hour_bucket"])
+        return e["day_type"], e["hour_bucket"]
+    return bus_schedule_periods.effective_day_type_and_hour(e["route_id"], e["day_type"], e["hour_bucket"])
 
 
 def accumulate_today(events: list[dict]) -> dict[str, dict[BucketKey, dict]]:
@@ -142,7 +147,8 @@ def accumulate_today(events: list[dict]) -> dict[str, dict[BucketKey, dict]]:
         group_events.sort(key=lambda e: e["observed_arrival_ts"])
         for prev, curr in zip(group_events, group_events[1:]):
             diff_s = (curr["observed_arrival_ts"] - prev["observed_arrival_ts"]).total_seconds()
-            key = (curr["route_id"], curr["stop_id"], curr["direction"], curr["day_type"], _effective_hour_bucket(curr))
+            eff_day_type, eff_hour = _effective_day_type_and_hour(curr)
+            key = (curr["route_id"], curr["stop_id"], curr["direction"], eff_day_type, eff_hour)
             entry = today["headway"].setdefault(key, _empty_entry("headway"))
             entry["counts"][_bin_index(diff_s, HIST_CONFIG["headway"])] += 1.0
             entry["n_observations"] += 1
@@ -155,7 +161,8 @@ def accumulate_today(events: list[dict]) -> dict[str, dict[BucketKey, dict]]:
     for e in parsed:
         if e["delay_seconds"] is None:
             continue
-        key = (e["route_id"], e["stop_id"], e["direction"], e["day_type"], _effective_hour_bucket(e))
+        eff_day_type, eff_hour = _effective_day_type_and_hour(e)
+        key = (e["route_id"], e["stop_id"], e["direction"], eff_day_type, eff_hour)
         entry = today["delay"].setdefault(key, _empty_entry("delay"))
         entry["counts"][_bin_index(float(e["delay_seconds"]), HIST_CONFIG["delay"])] += 1.0
         entry["n_observations"] += 1
@@ -169,7 +176,8 @@ def accumulate_today(events: list[dict]) -> dict[str, dict[BucketKey, dict]]:
     for e in parsed:
         if e["predicted_arrival_ts_at_T_minus_5"] is None:
             continue
-        key = (e["route_id"], e["stop_id"], e["direction"], e["day_type"], _effective_hour_bucket(e))
+        eff_day_type, eff_hour = _effective_day_type_and_hour(e)
+        key = (e["route_id"], e["stop_id"], e["direction"], eff_day_type, eff_hour)
         entry = today["prediction_error"].setdefault(key, _empty_entry("prediction_error"))
         if e["derivation_quality"] == "ambiguous":
             entry["n_ambiguous"] += 1

@@ -47,6 +47,7 @@ PERIOD_MERGE_TOLERANCE = 0.3  # 30% relative headway change vs. the
 # fine enough to not flatten a route's whole day into one period.
 
 _period_cache: dict[tuple[str, str], dict[int, int]] = {}
+_headway_cache: dict[tuple[str, str], dict[int, float]] = {}
 
 
 def _read_csv(z: zipfile.ZipFile, name: str) -> list[dict]:
@@ -119,6 +120,13 @@ def _scheduled_headway_by_hour(route_id: str, day_type: str) -> dict[int, float]
     return {}
 
 
+def _get_headway_by_hour(route_id: str, day_type: str) -> dict[int, float]:
+    cache_key = (route_id, day_type)
+    if cache_key not in _headway_cache:
+        _headway_cache[cache_key] = _scheduled_headway_by_hour(route_id, day_type)
+    return _headway_cache[cache_key]
+
+
 def _cluster_into_periods(hour_headway: dict[int, float]) -> dict[int, int]:
     """Hours with real scheduled headway data only -- walks them in order
     starting at ANCHOR_HOUR, wrapping through 0-23, merging an hour into
@@ -156,10 +164,41 @@ def period_hour_for(route_id: str, day_type: str, hour: int) -> int:
     to justify a merge -- never guesses a grouping it can't support."""
     cache_key = (route_id, day_type)
     if cache_key not in _period_cache:
-        headway_by_hour = _scheduled_headway_by_hour(route_id, day_type)
-        _period_cache[cache_key] = _cluster_into_periods(headway_by_hour)
+        _period_cache[cache_key] = _cluster_into_periods(_get_headway_by_hour(route_id, day_type))
     return _period_cache[cache_key].get(hour, hour)
+
+
+def _headways_equivalent(a: float, b: float) -> bool:
+    return abs(a - b) / max(a, b) <= PERIOD_MERGE_TOLERANCE if max(a, b) else True
+
+
+def effective_day_type_and_hour(route_id: str, day_type: str, hour: int) -> tuple[str, int]:
+    """Canonical (day_type, hour_bucket) bucket key for this route/hour --
+    merges weekend into weekday whenever this specific hour's real
+    scheduled headway is within PERIOD_MERGE_TOLERANCE on BOTH day types
+    (2026-10-12, user: a schedule-interval-based bucket scheme shouldn't
+    keep a separate weekday/weekend split for hours where the schedule
+    itself doesn't -- confirmed live against real GTFS: e.g. B15 shares
+    the same headway on 23 of its 24 scheduled hours, so splitting it by
+    day_type was needlessly doubling the real-world days needed to clear
+    MIN_N_OBSERVATIONS for almost every one of its buckets).
+
+    Only ever merges weekend INTO weekday (never the reverse) so there is
+    always exactly one canonical key -- which specific label is kept is
+    arbitrary, what matters is every observation for an equivalent hour
+    lands on the same row regardless of which real calendar day it was
+    observed on. Falls back to keeping day_type separate whenever either
+    day type lacks real schedule evidence for this hour, or the headways
+    genuinely differ -- never merges without real schedule evidence, same
+    discipline as period_hour_for's own hour-merge."""
+    if day_type == "weekend":
+        wd_headway = _get_headway_by_hour(route_id, "weekday").get(hour)
+        we_headway = _get_headway_by_hour(route_id, "weekend").get(hour)
+        if wd_headway is not None and we_headway is not None and _headways_equivalent(wd_headway, we_headway):
+            return "weekday", period_hour_for(route_id, "weekday", hour)
+    return day_type, period_hour_for(route_id, day_type, hour)
 
 
 def reset_cache_for_tests() -> None:
     _period_cache.clear()
+    _headway_cache.clear()
