@@ -159,18 +159,33 @@ def test_coverage_complete_is_false_for_a_corridor_with_no_real_buckets():
         assert coverage_complete(coverage) is False
 
 
-def test_coverage_complete_is_false_when_weekend_still_below_fraction():
-    coverage = {"M60+": {"weekday": (95, 100), "weekend": (50, 100)}}  # weekend only 50%
+def test_coverage_complete_is_false_when_the_combined_pool_is_still_below_fraction():
+    # 145/200 combined = 72.5%, still below the fraction even though it's
+    # one pool now, not two separately-gated day types.
+    coverage = {"M60+": {"weekday": (95, 100), "weekend": (50, 100)}}
     with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
         assert coverage_complete(coverage) is False
 
 
 def test_coverage_complete_is_true_once_every_tracked_corridor_clears_the_fraction():
     coverage = {
-        "M60+": {"weekday": (91, 100), "weekend": (90, 100)},  # exactly 90%
+        "M60+": {"weekday": (91, 100), "weekend": (90, 100)},  # exactly 90% combined
         "Q70+": {"weekday": (18, 20), "weekend": (19, 20)},
     }
     with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+", "Q70+"]):
+        assert coverage_complete(coverage) is True
+
+
+def test_coverage_complete_is_true_when_weekend_is_thin_but_combined_pool_clears(tmp_path):
+    # 2026-10-12 (user): the whole point of folding equivalent-schedule
+    # weekend hours into weekday is that a route shouldn't need its own
+    # independently-sufficient weekend pool anymore. Weekday alone is
+    # already well past 90%; weekend has a handful of real (divergent-
+    # hour) buckets that haven't cleared, but they're a small enough
+    # slice of the COMBINED pool not to drag the route below 90% overall
+    # -- the old per-day-type gate would have wrongly failed this route.
+    coverage = {"M60+": {"weekday": (190, 195), "weekend": (0, 5)}}  # 190/200 = 95% combined
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
         assert coverage_complete(coverage) is True
 
 

@@ -274,13 +274,23 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
 
 def coverage_complete(coverage: dict[str, dict[str, tuple[int, int]]]) -> bool:
     """Every corridor in CORRIDORS must clear COVERAGE_COMPLETION_FRACTION
-    for BOTH day types. A day_type with zero real (ever-observed) buckets
-    is always "not ready" -- no evidence yet, not an automatic pass."""
+    on its COMBINED weekday+weekend pool, not each day type separately
+    (2026-10-12, user). Requiring both independently double-penalized
+    routes where the weekend "problem" is already mostly solved by
+    bus_schedule_periods' equivalent-hour merge -- a route whose weekend
+    buckets are nearly all folded into weekday has almost no real
+    weekend-labeled buckets left to clear, so gating on that thin
+    remainder separately was never the right bar. A route with zero
+    real buckets at all (across both day types combined) is still
+    "not ready" -- no evidence yet, not an automatic pass."""
     for route in CORRIDORS:
+        cleared = total = 0
         for day_type in ("weekday", "weekend"):
-            cleared, total = coverage.get(route, {}).get(day_type, (0, 0))
-            if total == 0 or cleared / total < COVERAGE_COMPLETION_FRACTION:
-                return False
+            c, t = coverage.get(route, {}).get(day_type, (0, 0))
+            cleared += c
+            total += t
+        if total == 0 or cleared / total < COVERAGE_COMPLETION_FRACTION:
+            return False
     return True
 
 
