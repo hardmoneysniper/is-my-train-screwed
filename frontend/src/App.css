@@ -135,13 +135,38 @@ body {
   overflow-wrap: anywhere;
   /* Auto-grow is driven by JS (see App.tsx) setting an inline height up to
      this cap; beyond it the box stops growing and scrolls internally
-     instead of pushing the Send button/layout around indefinitely. */
-  max-height: 160px;
+     instead of pushing the Send button/layout around indefinitely. Raised
+     from 160px and given a transition so growth reads as a smooth expand
+     (like iMessage/WhatsApp's composer) rather than an abrupt snap -- the
+     160px cap meant any message past ~6 lines hit the OS's default,
+     boxy scrollbar almost immediately, which is what read as "a sliding
+     bar" rather than auto-expand. */
+  max-height: 40vh;
   overflow-y: auto;
+  transition: height 0.1s ease-out;
 }
 
 .composer-input::placeholder {
   color: rgba(10, 10, 10, 0.4);
+}
+
+/* A slim, low-contrast scrollbar for the rare case a message is long
+   enough to hit max-height -- the browser-default scrollbar is what
+   actually looked like a clunky "sliding bar"; this keeps the same
+   function without the boxy OS chrome. Webkit-only (Chrome/Edge/Safari);
+   Firefox falls back to its own default, still less obtrusive than
+   Windows' classic scrollbar. */
+.composer-input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.composer-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.composer-input::-webkit-scrollbar-thumb {
+  background: rgba(10, 10, 10, 0.2);
+  border-radius: 3px;
 }
 
 .composer-input:focus-visible {
