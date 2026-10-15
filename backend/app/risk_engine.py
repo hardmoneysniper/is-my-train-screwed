@@ -7,9 +7,10 @@ pulls the incoming-arrival and outgoing-headway distributions from
 `reliability_buckets`, and computes a miss probability exactly from the
 real observed data (see _p_miss_from_incoming's docstring for the
 2026-10-12 redesign). Never fabricates a number -- CLAUDE.md's "LLM
-agents never compute numbers" rule extends here too: a bucket missing or
-under MIN_N_OBSERVATIONS gets `quality="insufficient"` and `p_miss=None`,
-computed from nothing.
+agents never compute numbers" rule extends here too: a bucket that's
+missing, or whose confidence interval is too wide (see
+P_MISS_CI_HALF_WIDTH_MAX/WAIT_MEAN_CI_FRACTION_MAX, 2026-10-15), gets
+`quality="insufficient"` and `p_miss=None`, computed from nothing.
 
 Gap resolutions (see the brief for full rationale -- these are binding
 decisions, not arbitrary choices made while coding):
@@ -43,6 +44,7 @@ decisions, not arbitrary choices made while coding):
   `_fetch_subway_bucket`'s docstring.
 """
 import json
+import math
 import pathlib
 import sqlite3
 from datetime import date, datetime, timezone
@@ -85,6 +87,62 @@ LATE_NIGHT_SUPPRESSED_HOURS = frozenset({2, 3})
 # still built entirely from real observed incoming/outgoing trips --
 # lowering the threshold doesn't change what's real about the data, only
 # how much of it is required before citing a number from it.
+# 2026-10-15 (user): MIN_N_OBSERVATIONS no longer gates either citation
+# directly -- both p_miss and typical_wait_seconds now use a confidence-
+# interval gate instead (below). It's kept as a constant because
+# scripts/hourly_bus_sync.py's real_bucket_coverage() still imports it as
+# a deliberately simple progress-tracking proxy ("roughly how much data
+# per bucket is 'enough'"), not because any citation logic in this file
+# still checks against it. For p_miss specifically, the flat floor is
+# replaced below by a Wilson score confidence interval on the SAME
+# histogram weights --
+# real data confirmed this unlocks citation for 38% of buckets that
+# would otherwise sit at n<50 forever: a route whose true miss rate is
+# confidently near 0% or 100% needs far fewer real samples to pin down
+# than a genuinely uncertain ~50/50 case (required sample size for a
+# target CI width scales with p(1-p), which is maximized at p=0.5 and
+# shrinks toward the extremes) -- the same style of reasoning that
+# originally justified n=50 itself, just applied per-bucket instead of
+# as one flat number for every case. Wilson (not a naive normal-
+# approximation interval) specifically because it stays well-behaved at
+# small n and extreme p -- it never produces a degenerate zero-width
+# interval and never strays outside [0, 1].
+WILSON_Z = 1.96  # ~95% confidence
+P_MISS_CI_HALF_WIDTH_MAX = 0.15  # policy choice, not derived -- citable
+# once the interval is no wider than +-15 percentage points.
+
+# 2026-10-15 (user): the direct analog of the Wilson gate above, for a
+# MEAN rather than a proportion -- typical_wait_seconds' citation gate
+# replaces the flat `n >= MIN_N_OBSERVATIONS` floor with a confidence
+# interval on the mean, computed from the same outgoing histogram's
+# weighted variance (standard-error-of-the-mean: SE = sqrt(variance/n)).
+# Expressed as a FRACTION of the mean itself (not an absolute second
+# count) since a 2-minute route's wait needs a tighter absolute margin
+# than a 20-minute one for the same relative confidence. Real data
+# verified before the user picked this value: a +-25%-of-mean gate would
+# unlock 72.7% of currently-insufficient (n<50) headway buckets; the
+# user chose +-20% specifically (tighter than what was tested).
+WAIT_MEAN_CI_FRACTION_MAX = 0.20
+
+
+def _wilson_half_width(successes: float, n: float, z: float = WILSON_Z) -> float:
+    """Half-width of the Wilson score confidence interval for a binomial
+    proportion estimated from `successes` out of `n` real weighted
+    observations. Returns 1.0 (maximally uncertain) for n<=0 rather than
+    dividing by zero -- callers never reach this with real n=0 data
+    anyway (see the all-zero-histogram guard in _compute_transfer_risk),
+    but a safe degenerate return is cheap insurance."""
+    if n <= 0:
+        return 1.0
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    lo = (centre - half) / denom
+    hi = (centre + half) / denom
+    return (hi - lo) / 2
+
+
 # Freshness cap for citations (task-6-brief.md step 6): a transfer-risk
 # citation never claims to reflect more than this many days of history,
 # even once real collection has run far longer -- transit patterns and
@@ -262,11 +320,31 @@ def _p_miss_from_incoming(incoming_histogram: dict, buffer_seconds: float) -> fl
 def _typical_wait_seconds(outgoing_histogram: dict) -> float:
     """Weighted mean of the outgoing route's headway histogram -- "if you
     miss the planned vehicle, how long do you typically wait for the next
-    one." Independently gated on the outgoing bucket's own n_observations
-    (see _compute_transfer_risk), separate from whether the incoming
-    bucket is sufficient for a miss percentage."""
+    one." Gated on a confidence interval on this mean (see
+    WAIT_MEAN_CI_FRACTION_MAX and _mean_ci_half_width), independent of
+    whether the incoming bucket is sufficient for a miss percentage."""
     midpoints, weights = _bin_midpoints_and_weights(outgoing_histogram)
     return sum(m * w for m, w in zip(midpoints, weights)) / sum(weights)
+
+
+def _mean_ci_half_width(histogram: dict, mean: float, n: float, z: float = WILSON_Z) -> float:
+    """Half-width (in seconds) of a confidence interval on `mean`, the
+    weighted mean already computed from `histogram` -- the standard-
+    error-of-the-mean approach: weighted variance over the same bin
+    midpoints/weights, then SE = sqrt(variance / n), half-width = z * SE.
+    This is the continuous-quantity analog of _wilson_half_width above: a
+    tight, predictable headway distribution (low variance) needs far
+    fewer real samples to pin down a reliable mean than a highly
+    variable one, same underlying logic just for a mean instead of a
+    proportion. Returns a large sentinel for n<=0 rather than dividing
+    by zero -- callers never reach this with real n=0 data anyway (same
+    all-zero-histogram guard _typical_wait_seconds' caller already has)."""
+    if n <= 0:
+        return float("inf")
+    midpoints, weights = _bin_midpoints_and_weights(histogram)
+    variance = sum(w * (m - mean) ** 2 for m, w in zip(midpoints, weights)) / n
+    se = math.sqrt(variance / n)
+    return z * se
 
 
 def _incoming_stat_type(agency_i: str) -> str:
@@ -311,7 +389,7 @@ def _compute_transfer_risk(
     day_type: str,
     hour_bucket: int,
     buffer_seconds: float,
-) -> tuple[float | None, float, int, str, float | None, bool]:
+) -> tuple[float | None, float, int, str, float | None]:
     # Precompute lookup slot (deferred -- see docs/superpowers/plans/2026-08-27-phase-2-risk-engine-plan.md
     # Task 6 and README.md's "Known deferrals"). Not built yet: no 30+ days of real
     # data exist to run it against. When built, check a small (route_pair, day_type)
@@ -360,31 +438,38 @@ def _compute_transfer_risk(
     window_days = _window_days(incoming["window_start"]) if incoming else 0
     p_miss: float | None = None
     quality = "insufficient"
-    if incoming is not None and incoming_n >= MIN_N_OBSERVATIONS:
+    if incoming is not None:
         incoming_histogram = json.loads(incoming["histogram"])
         # Cheap insurance (final whole-branch review, Minor #2, still
         # applies): an all-zero histogram is just as "no real signal" as
         # a missing bucket, so degrade the same way rather than divide by
         # zero in _p_miss_from_incoming.
-        if sum(incoming_histogram["counts"]) > 0:
-            p_miss = _p_miss_from_incoming(incoming_histogram, buffer_seconds)
-            quality = "ok"
+        total_w = sum(incoming_histogram["counts"])
+        if total_w > 0:
+            candidate = _p_miss_from_incoming(incoming_histogram, buffer_seconds)
+            # Wilson CI gate (see P_MISS_CI_HALF_WIDTH_MAX's docstring)
+            # replaces the old flat incoming_n >= MIN_N_OBSERVATIONS
+            # check -- citable once the interval is narrow enough,
+            # regardless of raw n.
+            if _wilson_half_width(candidate * total_w, total_w) <= P_MISS_CI_HALF_WIDTH_MAX:
+                p_miss = candidate
+                quality = "ok"
 
-    # 2026-10-12 (user): no magnitude threshold on the wait itself -- "avoid
-    # the gate at all". Whenever a real typical_wait_seconds is citable, the
-    # agent always pairs it with the miss percentage and always offers a
-    # faster reroute, letting the rider -- not a hardcoded minute cutoff --
-    # decide whether the wait is worth it.
-    outgoing_n = outgoing["n_observations"] if outgoing else 0.0
+    # 2026-10-15 (user): typical_wait_seconds' citation gate is the mean-CI
+    # analog of p_miss's Wilson gate above -- replaces the flat
+    # outgoing_n >= MIN_N_OBSERVATIONS floor with "is the mean's own
+    # confidence interval tight enough," regardless of raw n.
     typical_wait_seconds: float | None = None
-    should_offer_reroute = False
-    if outgoing is not None and outgoing_n >= MIN_N_OBSERVATIONS:
+    if outgoing is not None:
         outgoing_histogram = json.loads(outgoing["histogram"])
-        if sum(outgoing_histogram["counts"]) > 0:
-            typical_wait_seconds = _typical_wait_seconds(outgoing_histogram)
-            should_offer_reroute = True
+        outgoing_total_w = sum(outgoing_histogram["counts"])
+        if outgoing_total_w > 0:
+            candidate_wait = _typical_wait_seconds(outgoing_histogram)
+            half_width = _mean_ci_half_width(outgoing_histogram, candidate_wait, outgoing_total_w)
+            if candidate_wait > 0 and half_width <= WAIT_MEAN_CI_FRACTION_MAX * candidate_wait:
+                typical_wait_seconds = candidate_wait
 
-    return p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute
+    return p_miss, n, window_days, quality, typical_wait_seconds
 
 
 def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, route_index: RouteIndex) -> TransferRisk:
@@ -413,7 +498,7 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
     day_type, hour_bucket = _local_day_type_and_hour(leg_j.start_time_ms)
     buffer_seconds = (leg_j.start_time_ms - leg_i.end_time_ms) / 1000
 
-    p_miss, n, window_days, quality, typical_wait_seconds, should_offer_reroute = _compute_transfer_risk(
+    p_miss, n, window_days, quality, typical_wait_seconds = _compute_transfer_risk(
         conn, agency_i, route_id_i, stop_id_i, agency_j, route_id_j, stop_id_j,
         day_type, hour_bucket, buffer_seconds,
     )
@@ -425,7 +510,6 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
         n=n,
         window_days=window_days,
         typical_wait_seconds=typical_wait_seconds,
-        should_offer_reroute=should_offer_reroute,
         quality=quality,
     )
 
@@ -442,11 +526,12 @@ def get_risk(
     from the real static GTFS zips. Both are overridable so tests can
     inject a `tmp_path` DB and a small synthetic `RouteIndex` instead of
     the real ~150MB GTFS files (matches Tasks 1/3/4/5's testing
-    convention). No rush/non-rush distinction (2026-10-12, user: "avoid the
-    gate at all") -- should_offer_reroute is simply whether a citable
-    typical_wait_seconds exists; the agent always narrates it alongside
-    p_miss and always asks whether the rider wants a faster route, with no
-    hardcoded minute threshold deciding that for them."""
+    convention). No should_offer_reroute field (2026-10-15, user: delete
+    that feature entirely) -- the agent always asks whether the rider
+    wants a faster route whenever either p_miss or typical_wait_seconds
+    is citable, with no separate gating computation here; see
+    ConversationAgent.SYSTEM_PROMPT for the actual ask-every-time
+    instruction."""
     owns_conn = conn is None
     if owns_conn:
         conn = get_connection()

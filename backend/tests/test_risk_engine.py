@@ -227,7 +227,6 @@ def test_one_transfer_with_sufficient_data_returns_ok_quality(conn, route_index)
     # Outgoing headway histogram's one weighted bin has midpoint 135s
     # (min_s=0, bin_width=30, i=4 -> 0+30*4.5=135).
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is True
 
 
 def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficient(conn, route_index):
@@ -301,7 +300,6 @@ def test_subway_incoming_leg_with_only_prediction_error_bucket_stays_insufficien
     # independently gated from the incoming one -- typical_wait_seconds
     # must still populate even though the miss percentage can't.
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is True
 
 
 def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_index):
@@ -374,7 +372,6 @@ def test_bus_incoming_leg_with_only_delay_bucket_stays_insufficient(conn, route_
     # Same independent-gating point as the subway test above, mirrored for
     # the bus-incoming case.
     assert r.typical_wait_seconds == 135.0
-    assert r.should_offer_reroute is True
 
 
 def test_incoming_stat_type_is_agency_dependent():
@@ -422,7 +419,6 @@ def test_missing_buckets_returns_insufficient(conn, route_index):
     assert r.n == 0
     assert r.window_days == 0
     assert r.typical_wait_seconds is None
-    assert r.should_offer_reroute is False
 
 
 def test_low_n_bucket_returns_insufficient(conn, route_index):
@@ -484,7 +480,194 @@ def test_low_n_bucket_returns_insufficient(conn, route_index):
     assert r.p_miss is None
     assert r.n == 10  # incoming bucket's own n_observations
     assert r.typical_wait_seconds is None  # outgoing bucket's histogram is all-zero despite n=300
-    assert r.should_offer_reroute is False
+
+
+# --- Wilson CI gate for p_miss (2026-10-15) -------------------------------
+
+
+def _two_leg_wilson_itinerary():
+    return Itinerary(
+        duration_seconds=900,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="Q",
+                from_stop_id="MTA_NYCT_Subway:127S",
+                from_stop_name="Lexington Av/63 St",
+                to_stop_id="MTA_NYCT_Subway:201N",
+                to_stop_name="Union Sq",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),  # 300s buffer after leg 1 ends
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+
+def test_low_n_but_confidently_extreme_p_miss_is_now_citable(conn, route_index):
+    # n=20, far below MIN_N_OBSERVATIONS=50 -- but 19/20 (p=0.95) is a real
+    # Wilson half-width of ~0.114, inside the +-0.15 gate. Bin i=20
+    # (midpoint 15s) is "caught" (under the 300s buffer); bin i=35
+    # (midpoint 465s) is "missed" (over it).
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": -600,
+            "counts": [1.0 if i == 20 else (19.0 if i == 35 else 0.0) for i in range(101)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.p_miss == 0.95
+    assert r.n == 20
+
+
+def test_low_n_and_genuinely_uncertain_p_miss_stays_insufficient(conn, route_index):
+    # n=20, same as above, but an even 10/10 split (p=0.5) -- the real
+    # Wilson half-width here is ~0.201, wider than the +-0.15 gate. A
+    # genuinely uncertain bucket still needs more data, same as before.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": -600,
+            "counts": [10.0 if i == 20 else (10.0 if i == 35 else 0.0) for i in range(101)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "insufficient"
+    assert r.p_miss is None
+
+
+# --- mean-CI gate for typical_wait_seconds (2026-10-15) ------------------
+
+
+def test_low_n_but_tight_spread_wait_time_is_now_citable(conn, route_index):
+    # n=20, far below MIN_N_OBSERVATIONS=50 -- but a tight spread (18 at
+    # midpoint 105s, 2 at midpoint 135s) gives a real mean-CI half-width
+    # that's only ~3.7% of the mean, well inside the +-20% gate.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": 0,
+            "counts": [18.0 if i == 3 else (2.0 if i == 4 else 0.0) for i in range(81)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.typical_wait_seconds == 108.0
+
+
+def test_low_n_and_wide_spread_wait_time_stays_insufficient(conn, route_index):
+    # n=20, same as above, but the weight is split far apart (10 at
+    # midpoint 75s, 10 at midpoint 315s) -- the real mean-CI half-width
+    # here is ~27% of the mean, wider than the +-20% gate.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="Q",
+        stop_id="127S",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="headway",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": 0,
+            "counts": [10.0 if i == 2 else (10.0 if i == 10 else 0.0) for i in range(81)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.typical_wait_seconds is None
+
+
+def test_high_p_miss_still_citable_with_no_outgoing_data_at_all(conn, route_index):
+    # p_miss=0.95, no outgoing bucket at all -- p_miss stays independently
+    # citable, and typical_wait_seconds stays honestly null (never
+    # guessed) rather than either one blocking the other.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": -600,
+            "counts": [1.0 if i == 20 else (19.0 if i == 35 else 0.0) for i in range(101)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.p_miss == 0.95
+    assert r.typical_wait_seconds is None
+
+
+def test_low_p_miss_still_citable_with_no_outgoing_data_at_all(conn, route_index):
+    # Same as above, mirrored for a low (not high) citable p_miss.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps({
+            "bin_width_s": 30, "min_s": -600,
+            "counts": [19.0 if i == 20 else (1.0 if i == 35 else 0.0) for i in range(101)],
+        }),
+        n_observations=20,
+    )
+    results = get_risk(_two_leg_wilson_itinerary(), conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.p_miss == 0.05
+    assert r.typical_wait_seconds is None
 
 
 def _two_leg_itinerary_for_reroute_test():
@@ -541,17 +724,15 @@ def _insert_reroute_test_buckets(conn):
     )
 
 
-def test_should_offer_reroute_is_true_whenever_typical_wait_seconds_is_citable(conn, route_index):
+def test_typical_wait_seconds_citable_regardless_of_magnitude(conn, route_index):
     # 2026-10-12 (user): "avoid the gate at all" -- no minute threshold,
-    # no rush/non-rush distinction. should_offer_reroute is simply whether
-    # a real typical_wait_seconds exists, regardless of its magnitude.
+    # no rush/non-rush distinction on the wait time's own value.
     _insert_reroute_test_buckets(conn)
     results = get_risk(_two_leg_itinerary_for_reroute_test(), conn=conn, route_index=route_index)
 
     assert len(results) == 1
     r = results[0]
     assert r.typical_wait_seconds == 615.0
-    assert r.should_offer_reroute is True
 
 
 # --- late-night bus citation suppression (2026-10-12) --------------------
@@ -629,7 +810,6 @@ def test_late_night_bus_outgoing_leg_has_no_wait_time_even_with_abundant_data(co
     assert len(results) == 1
     r = results[0]
     assert r.typical_wait_seconds is None
-    assert r.should_offer_reroute is False
 
 
 def test_late_night_subway_is_unaffected(conn, route_index):
@@ -873,6 +1053,36 @@ def test_typical_wait_seconds_is_weighted_mean_of_headway_histogram():
     # -> typical wait is exactly that midpoint.
     outgoing_histogram = {"bin_width_s": 30, "min_s": 0, "counts": [0.0, 0.0, 0.0, 0.0, 200.0]}
     assert risk_engine._typical_wait_seconds(outgoing_histogram) == 135.0
+
+
+def test_wilson_half_width_narrows_for_extreme_p_even_at_low_n():
+    assert risk_engine._wilson_half_width(19, 20) < risk_engine.P_MISS_CI_HALF_WIDTH_MAX
+    assert risk_engine._wilson_half_width(12, 12) < risk_engine.P_MISS_CI_HALF_WIDTH_MAX
+
+
+def test_wilson_half_width_stays_wide_for_uncertain_p_at_the_same_low_n():
+    assert risk_engine._wilson_half_width(10, 20) > risk_engine.P_MISS_CI_HALF_WIDTH_MAX
+
+
+def test_wilson_half_width_returns_max_uncertainty_for_zero_n():
+    assert risk_engine._wilson_half_width(0, 0) == 1.0
+
+
+def test_mean_ci_half_width_narrows_for_a_tight_spread_even_at_low_n():
+    histogram = {"bin_width_s": 30, "min_s": 0, "counts": [18.0 if i == 3 else (2.0 if i == 4 else 0.0) for i in range(81)]}
+    half_width = risk_engine._mean_ci_half_width(histogram, mean=108.0, n=20)
+    assert half_width <= risk_engine.WAIT_MEAN_CI_FRACTION_MAX * 108.0
+
+
+def test_mean_ci_half_width_stays_wide_for_a_wide_spread_at_the_same_low_n():
+    histogram = {"bin_width_s": 30, "min_s": 0, "counts": [10.0 if i == 2 else (10.0 if i == 10 else 0.0) for i in range(81)]}
+    half_width = risk_engine._mean_ci_half_width(histogram, mean=195.0, n=20)
+    assert half_width > risk_engine.WAIT_MEAN_CI_FRACTION_MAX * 195.0
+
+
+def test_mean_ci_half_width_returns_sentinel_for_zero_n():
+    histogram = {"bin_width_s": 30, "min_s": 0, "counts": [0.0] * 81}
+    assert risk_engine._mean_ci_half_width(histogram, mean=0.0, n=0) == float("inf")
 
 
 # --- Gap 3 (bus direction) fallback: direction-agnostic combination ------

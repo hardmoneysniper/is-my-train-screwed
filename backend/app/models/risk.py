@@ -67,22 +67,37 @@ class TransferRisk(BaseModel):
 
     - `p_miss` answers "did you catch the specific vehicle OTP planned for
       you" -- computed purely from the INCOMING leg's delay/prediction-error
-      distribution vs. the planned transfer buffer. Gated on the incoming
-      bucket's own n_observations alone. `quality == "ok"` pairs with a
-      real `p_miss`; `quality == "insufficient"` always pairs with
-      `p_miss = None` -- never a fabricated/placeholder number (CLAUDE.md's
-      "LLM agents never compute numbers" rule extends to this function).
+      distribution vs. the planned transfer buffer. Gated on a Wilson score
+      confidence interval over the incoming bucket's own histogram weights
+      (2026-10-15, replacing a flat `n >= MIN_N_OBSERVATIONS` floor -- see
+      `risk_engine.P_MISS_CI_HALF_WIDTH_MAX`'s docstring): citable once the
+      interval is narrow enough, regardless of raw n -- a route whose true
+      miss rate sits confidently near 0% or 100% needs far fewer real
+      samples than a genuinely uncertain ~50/50 case. `quality == "ok"`
+      pairs with a real `p_miss`; `quality == "insufficient"` always pairs
+      with `p_miss = None` -- never a fabricated/placeholder number
+      (CLAUDE.md's "LLM agents never compute numbers" rule extends here).
     - `typical_wait_seconds` answers "if you do miss it, how long do you
       wait for the next one" -- computed from the OUTGOING leg's headway
-      distribution. Gated on the outgoing bucket's own n_observations,
-      independent of whether `quality` is "ok". `None` when that bucket is
-      insufficient, same never-fabricate discipline.
-    - `should_offer_reroute` has no magnitude threshold (2026-10-12, user:
-      "avoid the gate at all") -- it's simply whether `typical_wait_seconds`
-      is citable at all (`True` whenever it's not `None`). The agent always
-      asks the rider if they want a faster route calculated whenever a wait
-      time is citable, no matter how short or long; it's the rider's call,
-      not a hardcoded cutoff.
+      distribution. Gated on a confidence interval on this MEAN (2026-10-15,
+      replacing a flat `n >= MIN_N_OBSERVATIONS` floor -- see
+      `risk_engine.WAIT_MEAN_CI_FRACTION_MAX`'s docstring, the direct analog
+      of `p_miss`'s Wilson gate for a mean instead of a proportion), citable
+      once the interval is within 20% of the mean itself, regardless of raw
+      n. `None` when that bucket is insufficient, same never-fabricate
+      discipline, independent of whether `quality` is "ok".
+
+    There is no `should_offer_reroute` field (2026-10-15, user: delete that
+    feature entirely) -- the agent always asks the rider whether they want
+    a faster route calculated whenever either `p_miss` or
+    `typical_wait_seconds` is citable, unconditionally, no separate gating
+    computation. See `ConversationAgent.SYSTEM_PROMPT`'s "Wait time and
+    rerouting" section for the actual instruction, and its "Calculating the
+    faster route" section for what happens once the rider says yes (or
+    reports missing the transfer and being unable to wait): a fresh, live
+    `plan_route` call from their current location, picking whatever OTP
+    says is fastest right now -- never estimated from this historical data,
+    and not necessarily even a different route than the one they had.
 
     These two signals are meant to always be narrated together when both
     are available (e.g. "55% chance of missing it, but the next one comes
@@ -98,4 +113,3 @@ class TransferRisk(BaseModel):
     window_days: int
     quality: Literal["ok", "insufficient"]
     typical_wait_seconds: float | None = None
-    should_offer_reroute: bool = False
