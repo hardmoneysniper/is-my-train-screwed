@@ -81,6 +81,25 @@ class _TrackedStop:
 
 
 def already_ingested(conn, service_date: date) -> bool:
+    """2026-10-15 real bug fix: this used to be the ONLY guard against
+    double-counting, so it had to be a permanent per-date lock -- but this
+    script runs hourly (scripts/hourly_bus_sync.py's categorize_bus_data()),
+    against TODAY's still-growing raw file, not just once after a day
+    closes. The old all-or-nothing lock meant the FIRST hourly run of any
+    given day to successfully derive even one event permanently locked
+    that whole calendar day -- every subsequent hour's worth of real
+    newly-collected data for it was silently never derived, for the rest
+    of that day, forever. Confirmed live: most recent days only ever
+    captured their first 30-60 minutes' worth of events before locking.
+    Real dedup now lives at the event level instead (db.py's
+    idx_arrival_events_bus_dedup unique index + _insert_events' INSERT OR
+    IGNORE), so today's date is never skipped here -- it's safe to
+    re-derive the whole file every hour, since already-captured events are
+    silently no-ops and newly-appended ones land for real. A PAST date is
+    still safe (and cheap) to skip once it has any row: its raw file can
+    never grow again, so there's nothing new to find."""
+    if service_date >= datetime.now(timezone.utc).date():
+        return False
     row = conn.execute(
         "SELECT 1 FROM arrival_events WHERE agency = 'bus' AND service_date = ? LIMIT 1",
         (service_date.isoformat(),),
@@ -184,9 +203,14 @@ def _build_event(
 
 
 def _insert_events(conn, events: list[dict]) -> None:
+    # OR IGNORE: see db.py's idx_arrival_events_bus_dedup -- re-deriving
+    # today's growing file from scratch every hour means most of these
+    # rows are already present from an earlier run this same day; the
+    # unique index silently no-ops those and only the genuinely new ones
+    # (from raw data appended since the last run) actually insert.
     conn.executemany(
         """
-        INSERT INTO arrival_events (
+        INSERT OR IGNORE INTO arrival_events (
             agency, route_id, direction, stop_id, vehicle_id, trip_id,
             observed_arrival_ts, scheduled_arrival_ts, delay_seconds,
             predicted_arrival_ts_at_T_minus_5, service_date, day_type,

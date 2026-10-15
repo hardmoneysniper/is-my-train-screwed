@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from db import get_connection
-from scripts.derive_bus_arrival_events import process_day, run_derive
+from scripts.derive_bus_arrival_events import already_ingested, process_day, run_derive
 
 LOCAL_TZ = ZoneInfo("America/New_York")
 SERVICE_DATE = date(2026, 8, 29)  # a real Saturday -> exercises "weekend" day_type too
@@ -289,6 +289,73 @@ def test_rerunning_already_ingested_day_is_a_noop(tmp_path, conn):
 
     process_day(conn, raw_path, SERVICE_DATE)
     assert len(_all_events(conn)) == 1
+
+
+def test_todays_growing_file_is_rederived_to_capture_newly_appended_events(tmp_path, conn):
+    # 2026-10-15 real bug fix: a day still in progress (its raw file keeps
+    # growing all day) must be re-derived every call, not permanently
+    # locked after the first successful derive the way a closed past day
+    # correctly is (see test_rerunning_already_ingested_day_is_a_noop
+    # above). Confirmed live: the old lock meant most recent days only
+    # ever captured their first 30-60 minutes before silently freezing.
+    today = datetime.now(timezone.utc).date()
+    today_t0 = datetime.now(timezone.utc).replace(hour=0, minute=1, second=0, microsecond=0)
+    raw_path = tmp_path / f"{today.isoformat()}.ndjson"
+
+    _write_ndjson(raw_path, [
+        _record(today_t0, stop_id="S1", vehicle_id="V1"),
+        _record(today_t0 + timedelta(seconds=30), stop_id="S2", vehicle_id="V1"),
+    ])
+    process_day(conn, raw_path, today)
+    assert len(_all_events(conn)) == 1
+
+    # More real data "arrives" later the same day -- appended, not
+    # replacing what's already there, matching how the real collector
+    # writes to this file (bus_collector.py reopens in append mode).
+    with open(raw_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(_record(today_t0 + timedelta(hours=5), stop_id="S3", vehicle_id="V2")) + "\n")
+        f.write(json.dumps(_record(today_t0 + timedelta(hours=5, seconds=30), stop_id="S4", vehicle_id="V2")) + "\n")
+
+    process_day(conn, raw_path, today)
+    # The original event is still there exactly once (re-reading the
+    # file's unchanged prefix doesn't duplicate it -- see
+    # idx_arrival_events_bus_dedup), plus the genuinely new one.
+    assert len(_all_events(conn)) == 2
+
+
+def test_rerunning_todays_unchanged_file_does_not_duplicate(tmp_path, conn):
+    today = datetime.now(timezone.utc).date()
+    today_t0 = datetime.now(timezone.utc).replace(hour=0, minute=1, second=0, microsecond=0)
+    raw_path = tmp_path / f"{today.isoformat()}.ndjson"
+    _write_ndjson(raw_path, [
+        _record(today_t0, stop_id="S1", vehicle_id="V1"),
+        _record(today_t0 + timedelta(seconds=30), stop_id="S2", vehicle_id="V1"),
+    ])
+
+    process_day(conn, raw_path, today)
+    process_day(conn, raw_path, today)
+    assert len(_all_events(conn)) == 1
+
+
+def test_already_ingested_never_locks_todays_date_even_with_rows(conn):
+    today = datetime.now(timezone.utc).date()
+    conn.execute(
+        "INSERT INTO arrival_events (agency, service_date) VALUES ('bus', ?)",
+        (today.isoformat(),),
+    )
+    conn.commit()
+    assert already_ingested(conn, today) is False
+
+
+def test_already_ingested_locks_a_past_date_once_it_has_any_row(conn):
+    past = date(2026, 8, 29)
+    assert already_ingested(conn, past) is False
+    conn.execute(
+        "INSERT INTO arrival_events (agency, service_date) VALUES ('bus', ?)",
+        (past.isoformat(),),
+    )
+    conn.commit()
+    assert already_ingested(conn, past) is True
 
 
 def test_trip_update_line_missing_required_field_is_skipped_not_crashed(tmp_path, conn, capsys):

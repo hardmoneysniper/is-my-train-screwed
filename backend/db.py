@@ -48,10 +48,23 @@ CREATE TABLE IF NOT EXISTS arrival_events (
     derivation_quality TEXT
 );
 
--- Ingestion/import access pattern for Tasks 3 and 4 (not unique --
--- actual dedup on (vehicle_id, stop_id, service_date) is Task 4's job).
+-- Ingestion/import access pattern for Tasks 3 and 4.
 CREATE INDEX IF NOT EXISTS idx_arrival_events_ingest
     ON arrival_events (agency, route_id, stop_id, service_date);
+
+-- Real per-event dedup (2026-10-15 fix -- see derive_bus_arrival_events.py's
+-- already_ingested docstring for the bug this replaces): one real bus
+-- passage is uniquely identified by which vehicle passed which stop and
+-- when it was observed doing so. INSERT OR IGNORE against this index is
+-- what makes it safe to re-derive a day's still-growing raw file on every
+-- hourly run -- already-captured events are silently skipped, newly
+-- appended ones are inserted for real. Partial index (agency='bus' only):
+-- subway's backfill is a separate, one-shot, already-complete-day
+-- pipeline (scripts/run_local_pipeline.py) with no analogous intraday
+-- re-derive need, so there's no reason to pay this index's cost for it.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_arrival_events_bus_dedup
+    ON arrival_events (vehicle_id, stop_id, observed_arrival_ts)
+    WHERE agency = 'bus';
 
 CREATE TABLE IF NOT EXISTS reliability_buckets (
     id INTEGER PRIMARY KEY,
