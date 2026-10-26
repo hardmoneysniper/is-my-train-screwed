@@ -31,7 +31,7 @@ from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
+CORRIDORS = ["M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
@@ -54,6 +54,14 @@ CORRIDORS = ["Q70+", "M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  #
 # real_bucket_coverage() (direct reliability_buckets measurement against
 # MIN_N_OBSERVATIONS, not a raw-record proxy) before any route is removed
 # from this list again.
+#
+# 2026-10-26 (user): Q70+ removed again, this time on a trustworthy
+# real_bucket_coverage() measurement -- 100% combined weekday+weekend
+# bucket coverage (36/36), following the 2026-10-25 fix to
+# hourly_bus_sync.py's late-night exclusion (it was comparing a stored
+# period index against literal hour values -- see that script's
+# _late_night_period_keys). The other 8 routes stay well under 90%
+# combined and remain active.
 #
 # Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
 # Q70+/M60+ (checked directly, not assumed from that pattern; not every route
