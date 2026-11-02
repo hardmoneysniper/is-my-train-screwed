@@ -31,7 +31,7 @@ from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
-CORRIDORS = ["M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
+CORRIDORS = ["M60+", "Q102", "Q3", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
 # second-priority tier -- real passenger-facing LGA/JFK AirTrain connectors,
@@ -61,6 +61,14 @@ CORRIDORS = ["M60+", "Q102", "Q3", "B15", "Q10", "Q72", "Q80", "Q90"]  # spec §
 # hourly_bus_sync.py's late-night exclusion (it was comparing a stored
 # period index against literal hour values -- see that script's
 # _late_night_period_keys). The other 8 routes stay well under 90%
+# combined and remain active.
+#
+# 2026-11-02 (user): B15 removed -- real_bucket_coverage() measured 94%
+# combined weekday+weekend (764/816), driven by B15's near-total
+# weekday/weekend schedule equivalence (23 of 24 scheduled hours fold
+# into one shared bucket via bus_schedule_periods.py's
+# effective_day_type_and_hour, so almost everything landed in "weekday"
+# with "weekend" left at 0/0). The other 7 routes stay well under 90%
 # combined and remain active.
 #
 # Q102's real route_id confirmed live as "Q102" -- no SBS "+" suffix, unlike
