@@ -22,6 +22,16 @@
     },
     {
       "type": "gtfs",
+      "feedId": "MTA_NYCT_Bus_Queens",
+      "source": "file:///var/opentripplanner/bus_queens_filtered.zip"
+    },
+    {
+      "type": "gtfs",
+      "feedId": "MTA_NYCT_Bus_Brooklyn",
+      "source": "file:///var/opentripplanner/bus_brooklyn_filtered.zip"
+    },
+    {
+      "type": "gtfs",
       "feedId": "NYCFerry",
       "source": "file:///var/opentripplanner/ferry.zip"
     }

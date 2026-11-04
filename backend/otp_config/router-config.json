@@ -69,6 +69,20 @@
       "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=${MTA_BUSTIME_API_KEY}",
       "feedId": "MTA_NYCT_Bus_Manhattan",
       "fuzzyTripMatching": false
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=${MTA_BUSTIME_API_KEY}",
+      "feedId": "MTA_NYCT_Bus_Queens",
+      "fuzzyTripMatching": false
+    },
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://gtfsrt.prod.obanyc.com/tripUpdates?key=${MTA_BUSTIME_API_KEY}",
+      "feedId": "MTA_NYCT_Bus_Brooklyn",
+      "fuzzyTripMatching": false
     }
   ]
 }
