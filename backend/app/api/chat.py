@@ -3,10 +3,22 @@ from typing import Literal
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+import cost_guard
 from app.agents.conversation_agent import ConversationAgent
 from app.rate_limit import enforce_rate_limit
 
 router = APIRouter(tags=["chat"])
+
+# Shown instead of a raw 500 if the monthly Anthropic spend cap has been
+# hit (cost_guard.CostCapExceeded is deliberately left uncaught all the
+# way up to here -- see conversation_agent.py -- so this is the one place
+# it should ever be caught, turning "every request 500s with no
+# explanation for the rest of the month" into an honest, distinct message
+# instead of looking identical to any other failure.
+COST_CAP_REPLY = (
+    "We've hit this month's usage limit, so I can't chat right now -- "
+    "please check back next month, or let the team know if this is urgent."
+)
 
 
 class ChatMessage(BaseModel):
@@ -26,5 +38,8 @@ class ChatRequest(BaseModel):
 async def chat(req: ChatRequest):
     agent = ConversationAgent()
     history = [{"role": m.role, "content": m.content} for m in req.conversation_history]
-    reply = await agent.respond(req.message, history, req.anonymous_id, req.user_location)
+    try:
+        reply = await agent.respond(req.message, history, req.anonymous_id, req.user_location)
+    except cost_guard.CostCapExceeded:
+        return {"reply": COST_CAP_REPLY}
     return {"reply": reply}

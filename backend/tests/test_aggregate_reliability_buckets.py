@@ -358,6 +358,45 @@ def test_rerunning_already_processed_day_is_a_noop(conn):
     assert bucket_second["last_updated"] == bucket_first["last_updated"]
 
 
+def test_todays_date_is_never_folded_even_if_events_exist(conn):
+    # 2026-10-17 real bug fix: a day still in progress must never be folded
+    # into reliability_buckets -- process_day() ADDS a fresh full-day sum on
+    # top of whatever's already stored, so re-running it against the SAME
+    # still-growing day (as the hourly bus sync does) would double-count.
+    # Confirmed live: this silently locked every bus corridor's coverage at
+    # whatever partial data existed minutes into each day, for dozens of
+    # consecutive hourly runs, before this fix.
+    today = datetime.now(timezone.utc).date()
+    _insert_event(conn, service_date=today, observed_arrival_ts=datetime.now(timezone.utc), delay_seconds=45)
+
+    run_aggregate(conn)
+
+    assert _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay") is None
+    processed = conn.execute(
+        "SELECT 1 FROM processed_days WHERE agency = 'subway' AND service_date = ?",
+        (today.isoformat(),),
+    ).fetchone()
+    assert processed is None
+
+
+def test_a_past_day_still_gets_folded_exactly_once_the_day_after(conn):
+    # The flip side of the fix above: once a day is genuinely closed (any
+    # date strictly before today), it must still be eligible and processed
+    # normally -- the fix only excludes TODAY, not all unprocessed days.
+    _insert_event(conn, delay_seconds=45)  # SERVICE_DATE (2026-08-24), always in the past
+
+    run_aggregate(conn)
+
+    bucket = _get_bucket(conn, "subway", "F", "B06", "N", "weekday", 8, "delay")
+    assert bucket is not None
+    assert bucket["n_observations"] == 1
+    processed = conn.execute(
+        "SELECT 1 FROM processed_days WHERE agency = 'subway' AND service_date = ?",
+        (SERVICE_DATE.isoformat(),),
+    ).fetchone()
+    assert processed is not None
+
+
 def test_headway_at_or_above_40_minutes_clips_to_last_bin(conn):
     _insert_event(
         conn,

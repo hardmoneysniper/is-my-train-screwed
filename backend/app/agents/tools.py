@@ -38,6 +38,18 @@ FIND_ADDRESS_TOOL = {
     },
 }
 
+FIND_PLACE_TOOL = {
+    "name": "find_place",
+    "description": "Look up a free-text business or landmark name within NYC to get candidate coordinates (e.g. 'the Zara on 21st St', 'Hudson Yards'). Call this only after find_stop and find_address have both already returned no match — it's a broader, last-resort search. Returns a list of up to 5 real candidates (internally rephrased into a geocoder-friendly form already — pass the user's wording through as-is). If it returns more than one candidate, show the distinct options to the user and ask which they meant — never assume the first one. If it returns an empty list, ask the user to clarify or try a stop name or exact address instead — never guess coordinates.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The free-text business or landmark name to search for, ideally including a street or neighborhood if known."},
+        },
+        "required": ["query"],
+    },
+}
+
 GET_RISK_TOOL = {
     "name": "get_risk",
     "description": "Check transfer-miss probability for the itinerary you just planned. Never estimate this yourself — always call this tool and narrate its exact result.",

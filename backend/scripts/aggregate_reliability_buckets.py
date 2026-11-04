@@ -76,19 +76,41 @@ def _empty_entry(stat_type: str) -> dict:
 
 def find_unprocessed_days(conn) -> list[tuple[str, date]]:
     """Every (agency, service_date) present in arrival_events that isn't
-    yet in processed_days, oldest first per agency. Cross-agency order
-    doesn't matter -- each bucket key includes agency, so subway's and
-    bus's decay chains are fully independent (task-5-brief.md)."""
+    yet in processed_days AND is a genuinely closed (strictly past) day,
+    oldest first per agency. Cross-agency order doesn't matter -- each
+    bucket key includes agency, so subway's and bus's decay chains are
+    fully independent (task-5-brief.md).
+
+    2026-10-17 real bug fix: this used to include TODAY's date too, which
+    is fatal here (unlike derive_bus_arrival_events.py's already_ingested,
+    fixed 2026-10-15) -- process_day() ADDS a freshly-fetched full-day
+    event count on top of whatever's already stored every time it runs, so
+    re-running it against the SAME still-growing day would double-count
+    every event already folded in a prior run that same day. Since this
+    runs hourly (scripts/hourly_bus_sync.py's categorize_bus_data()), the
+    first hourly run of any given day permanently marked that day
+    processed_days at whatever partial data existed ~minutes in, silently
+    discarding the rest of that day's real collection forever. Confirmed
+    live: every bus corridor's bucket coverage was bit-for-bit frozen
+    across dozens of consecutive hourly runs (B15: 87 runs, ~3.6 days).
+    Excluding today defers it to the next day's run once it's safely
+    closed and can't grow further -- matches this module's own "nightly
+    fold" design intent (see module docstring), and is safe because the
+    per-day cumulative-add in process_day() still only ever runs once per
+    (agency, service_date), now genuinely guaranteed rather than assumed."""
+    today = datetime.now(timezone.utc).date()
     rows = conn.execute(
         """
         SELECT DISTINCT ae.agency, ae.service_date
         FROM arrival_events ae
-        WHERE NOT EXISTS (
+        WHERE ae.service_date < ?
+          AND NOT EXISTS (
             SELECT 1 FROM processed_days pd
             WHERE pd.agency = ae.agency AND pd.service_date = ae.service_date
         )
         ORDER BY ae.agency, ae.service_date
-        """
+        """,
+        (today.isoformat(),),
     ).fetchall()
     return [(row["agency"], date.fromisoformat(row["service_date"])) for row in rows]
 

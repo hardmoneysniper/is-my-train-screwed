@@ -1,4 +1,5 @@
 # backend/app/agents/conversation_agent.py
+import asyncio
 import json
 from datetime import datetime, timezone
 from anthropic import AsyncAnthropic
@@ -9,10 +10,13 @@ from app.agents.tools import (
     CANCEL_MONITORED_TRIP_TOOL,
     CREATE_MONITORED_TRIP_TOOL,
     FIND_ADDRESS_TOOL,
+    FIND_PLACE_TOOL,
     FIND_STOP_TOOL,
     GET_RISK_TOOL,
     PLAN_ROUTE_TOOL,
 )
+from app.find_place import find_place
+from app.location_resolver import resolve_location_description
 from app.geocode import geocode_address
 from app.otp_lifecycle import ensure_otp_awake
 from app.models.monitoring import MonitoredTrip
@@ -44,9 +48,42 @@ SYSTEM_PROMPT = (
     "present, ask them to share their location or name a place instead. "
     "If the user types a street address, call find_address to resolve it, "
     "then use the result's lat/lon with plan_route — if it returns null, "
-    "tell them you couldn't find that address and ask them to clarify or "
-    "try a stop name instead, never invent coordinates. "
+    "try find_place next (see below) rather than giving up immediately. "
     "Keep answers to 1-3 sentences.\n\n"
+    "find_place fallback: if BOTH find_stop and find_address return no "
+    "match for a free-text origin or destination, call find_place — a "
+    "broader business/landmark-name search that already normalizes vague "
+    "or colloquial wording internally before geocoding it, so pass the "
+    "user's description through as-is. It returns a LIST of candidates, "
+    "not one answer — if it returns more than one, list the distinct "
+    "matches (using each one's real formatted address) and ask the user "
+    "which they meant before proceeding, e.g. \"I found a few matches — "
+    "did you mean the Zara at 222 Broadway, or at 1963 Broadway?\" If it "
+    "returns exactly one candidate, treat it the same as a find_stop/"
+    "find_address match and confirm it the usual way below. If it "
+    "returns an empty list, tell them you couldn't find that place and "
+    "ask them to clarify or try a stop name or exact address instead — "
+    "never invent coordinates.\n\n"
+    "Confirming a resolved location: whenever you resolve an origin or "
+    "destination via find_stop, find_address, or find_place (never for "
+    "the user's exact device location marker — that's already exact, no "
+    "confirmation needed), show them exactly what you resolved it to "
+    "(the real stop name, matched address, or matched place) and ask "
+    "them to confirm before calling plan_route, e.g. \"Did you mean "
+    "Lexington Av/63 St? Reply YES if this is correct.\" Only call "
+    "plan_route once they confirm. If they say no or give a correction, "
+    "resolve the new answer the same way and ask again — never guess "
+    "which one they meant. This applies every time a free-text origin or "
+    "destination gets resolved this way, not just on a trip's first "
+    "request — including resolving a new destination for a reroute or "
+    "mid-trip change below. If a trip already has both an origin and a "
+    "destination confirmed and the user corrects only one of them, "
+    "re-resolve only the one they corrected — leave the other exactly as "
+    "already confirmed — then show BOTH together in the new confirmation "
+    "message (e.g. \"Got it — from Roosevelt Island to 150 West 22nd "
+    "Street. Reply YES if this is correct.\"), not just the changed one "
+    "in isolation, so they can review the full trip before you call "
+    "plan_route again.\n\n"
     "Walking directions: when an itinerary includes a WALK leg, condense its "
     "steps into 1-2 natural sentences using the real street names, distances, "
     "and turns it contains — don't mechanically recite every step, and don't "
@@ -106,15 +143,21 @@ SYSTEM_PROMPT = (
     "to the reroute offer, or independently tells you BOTH that they've "
     "already missed the transfer AND that they can't/won't wait for the "
     "next one — missing it alone, without that second signal, still gets "
-    "the ask above instead of an automatic reroute. When it does trigger, "
-    "call plan_route fresh from their current location (resolve it the "
-    "same way as any other request — use a [User's current location: "
-    "...] marker if present, otherwise ask) to their original "
-    "destination, and narrate whatever OTP actually returns as the "
-    "fastest option — never estimate, never assume it must differ from "
-    "their original route (the fastest real option might legitimately be "
-    "the same one), and never reference the historical get_risk data "
-    "when deciding what to recommend here.\n\n"
+    "the ask above instead of an automatic reroute. When it does trigger: "
+    "if they have an active monitored trip, first call "
+    "cancel_monitored_trip with no trip_id (same as the Mid-trip "
+    "destination change flow below — it auto-resolves their active trip) "
+    "so the Trip Monitor never keeps tracking the now-stale original "
+    "itinerary. Then call plan_route fresh from their current location "
+    "(resolve it the same way as any other request — use a [User's "
+    "current location: ...] marker if present, otherwise ask) to their "
+    "original destination, and narrate whatever OTP actually returns as "
+    "the fastest option — never estimate, never assume it must differ "
+    "from their original route (the fastest real option might "
+    "legitimately be the same one), and never reference the historical "
+    "get_risk data when deciding what to recommend here. Then fall "
+    "through to this prompt's normal get_risk/monitoring-offer logic for "
+    "the new itinerary, exactly as for any new trip.\n\n"
     "Monitoring a trip: after checking get_risk, if any entry has quality \"ok\"\n"
     "(any real percentage, however small), or the trip sounds deadline-sensitive\n"
     "(the user mentions a flight, interview, appointment, or says they're short\n"
@@ -147,8 +190,8 @@ SYSTEM_PROMPT = (
     "trip), then get their current location the same way as any other "
     "current-location reference (use it if already present on the message, "
     "otherwise ask for it), then call plan_route fresh from that location to "
-    "the newly-named destination (resolving it via find_stop/find_address "
-    "same as any new trip request), then fall through to this prompt's "
+    "the newly-named destination (resolving it via find_stop/find_address/"
+    "find_place same as any new trip request), then fall through to this prompt's "
     "normal monitoring-offer logic for the new trip."
 )
 
@@ -191,6 +234,7 @@ class ConversationAgent:
                 GET_RISK_TOOL,
                 FIND_STOP_TOOL,
                 FIND_ADDRESS_TOOL,
+                FIND_PLACE_TOOL,
                 CREATE_MONITORED_TRIP_TOOL,
                 CANCEL_MONITORED_TRIP_TOOL,
             ],
@@ -200,7 +244,7 @@ class ConversationAgent:
         # or past the local cap -- deliberately left to propagate rather
         # than caught here, since a caught-and-swallowed cap breach would
         # silently let the agent keep responding past its budget.
-        cost_guard.log_call(response.usage.model_dump(), agent="conversation_agent")
+        cost_guard.log_call(response.usage.model_dump(), agent="conversation_agent", model=settings.conversation_agent_model)
         return response
 
     def _handle_get_risk(self, tool_input: dict, last_itineraries: list[Itinerary]) -> str:
@@ -272,6 +316,19 @@ class ConversationAgent:
         # call. The LLM needs today's date/time to parse a stated deadline
         # ("by 6pm") into a real epoch-ms timestamp. user_location follows
         # the identical pattern, for the identical reason.
+        # 2026-10-15 (user): wake OTP the moment a user starts a NEW
+        # conversation (empty history, same signal the PWA already uses
+        # for "is this a first message" -- no new tracking needed),
+        # fire-and-forget, before the LLM call even starts. The time the
+        # user spends reading the reply and typing their next message is
+        # the real cold-start mask, same reasoning already proven out for
+        # the (now-abandoned) SMS channel design. A returning user mid-
+        # conversation has almost certainly already triggered this via
+        # their first message, so there's no reason to repeat it every
+        # turn.
+        if not conversation_history:
+            asyncio.create_task(ensure_otp_awake())
+
         now_iso = datetime.now(timezone.utc).isoformat()
         prefix = f"[Current time: {now_iso}]"
         if user_location is not None:
@@ -304,6 +361,10 @@ class ConversationAgent:
                 elif tool_use.name == "find_address":
                     result = await geocode_address(tool_use.input["address"])
                     content = json.dumps(result)
+                elif tool_use.name == "find_place":
+                    resolved_query = await resolve_location_description(tool_use.input["query"])
+                    place_result = await find_place(resolved_query)
+                    content = json.dumps(place_result)
                 elif tool_use.name == "create_monitored_trip":
                     content = self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
                 elif tool_use.name == "cancel_monitored_trip":

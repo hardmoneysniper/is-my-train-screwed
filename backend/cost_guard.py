@@ -19,15 +19,32 @@ from pathlib import Path
 
 LOG_PATH = Path(__file__).parent / "data" / "cost_log.ndjson"
 
-# Haiku 4.5 pricing (USD per million tokens) — verify against
+# USD per million tokens, keyed by model id. Verify against
 # https://platform.claude.com/docs/en/about-claude/pricing before trusting
-# this for real budgeting; update here if pricing changes. Confirmed live
-# 2026-08-24, including the prompt-caching multipliers below (a 5-minute
-# cache write costs 1.25x base input; a cache hit costs 0.1x base input).
-PRICE_PER_MTOK_INPUT_USD = 1.00
-PRICE_PER_MTOK_OUTPUT_USD = 5.00
-PRICE_PER_MTOK_CACHE_WRITE_USD = 1.25
-PRICE_PER_MTOK_CACHE_READ_USD = 0.10
+# this for real budgeting; update here if pricing changes.
+#
+# Haiku 4.5 confirmed live 2026-08-24, including the prompt-caching
+# multipliers (a 5-minute cache write costs 1.25x base input; a cache hit
+# costs 0.1x base input). Sonnet 5 confirmed live 2026-10-17 ($2/$10,
+# Anthropic's permanent standard rate after the planned Sept 2026 increase
+# to $3/$15 was cancelled) -- its cache multipliers are assumed to follow
+# the same 1.25x/0.1x-of-base-input ratio Haiku's docs confirm, not
+# separately verified per-model (Anthropic prices caching proportionally
+# to base input rate across its models).
+#
+# 2026-10-17 real fix: log_call() used to apply ONLY the Haiku rates to
+# every call regardless of which model actually ran -- harmless while
+# Haiku was the only model in use, but would have silently undercounted a
+# Sonnet call's real cost by ~2-3x against the $5 hard cap the moment one
+# was added (app/location_resolver.py, this same session). Caller must now
+# pass the real model id; an unrecognized model id falls back to Haiku's
+# rates with a printed warning rather than raising, so a typo'd model
+# string degrades to an undercount (loud, not silent) instead of a crash.
+_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+PRICING_PER_MTOK_USD: dict[str, dict[str, float]] = {
+    _HAIKU_MODEL: {"input": 1.00, "output": 5.00, "cache_write": 1.25, "cache_read": 0.10},
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50, "cache_read": 0.20},
+}
 
 # How many multiples of the sustainable daily rate (cap / 30) count as
 # "draining too fast" and trigger the alarm print.
@@ -42,7 +59,11 @@ def _hard_cap_usd() -> float:
     return float(os.environ.get("ANTHROPIC_MONTHLY_SPEND_CAP_USD", "5"))
 
 
-def _cost_usd(usage: dict) -> float:
+def _cost_usd(usage: dict, model: str) -> float:
+    rates = PRICING_PER_MTOK_USD.get(model)
+    if rates is None:
+        print(f"[cost_guard] unrecognized model {model!r}, falling back to Haiku rates for cost tracking", flush=True)
+        rates = PRICING_PER_MTOK_USD[_HAIKU_MODEL]
     input_tokens = usage.get("input_tokens", 0) or 0
     output_tokens = usage.get("output_tokens", 0) or 0
     # Present (as separate fields, not folded into input_tokens) whenever
@@ -50,10 +71,10 @@ def _cost_usd(usage: dict) -> float:
     # for callers that don't use caching.
     cache_creation_tokens = usage.get("cache_creation_input_tokens", 0) or 0
     cache_read_tokens = usage.get("cache_read_input_tokens", 0) or 0
-    return (input_tokens / 1_000_000) * PRICE_PER_MTOK_INPUT_USD + \
-           (output_tokens / 1_000_000) * PRICE_PER_MTOK_OUTPUT_USD + \
-           (cache_creation_tokens / 1_000_000) * PRICE_PER_MTOK_CACHE_WRITE_USD + \
-           (cache_read_tokens / 1_000_000) * PRICE_PER_MTOK_CACHE_READ_USD
+    return (input_tokens / 1_000_000) * rates["input"] + \
+           (output_tokens / 1_000_000) * rates["output"] + \
+           (cache_creation_tokens / 1_000_000) * rates["cache_write"] + \
+           (cache_read_tokens / 1_000_000) * rates["cache_read"]
 
 
 def _read_log() -> list[dict]:
@@ -67,14 +88,19 @@ def _sum_cost_for_prefix(records: list[dict], ts_prefix: str) -> float:
     return sum(r["cost_usd"] for r in records if r["ts"].startswith(ts_prefix))
 
 
-def log_call(usage: dict, agent: str) -> float:
+def log_call(usage: dict, agent: str, model: str = _HAIKU_MODEL) -> float:
     """Append a call's cost to the log; return this call's cost in USD.
+
+    `model` must be the real model id the call actually ran against --
+    defaults to Haiku only for backwards compatibility with callers that
+    predate per-model pricing (2026-10-17); always pass it explicitly for
+    any new call site.
 
     Raises CostCapExceeded if this call pushes month-to-date spend at or
     past the configured cap — callers should treat that as fatal for any
     further LLM calls this month.
     """
-    cost = _cost_usd(usage)
+    cost = _cost_usd(usage, model)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps({

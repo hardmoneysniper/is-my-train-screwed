@@ -1,6 +1,7 @@
 from unittest.mock import patch, AsyncMock
 import pytest
 from fastapi.testclient import TestClient
+import cost_guard
 from app.main import app
 from app.rate_limit import reset_for_tests
 
@@ -71,6 +72,23 @@ def test_chat_passes_anonymous_id_through_to_respond():
     mock_respond.assert_awaited_once_with(
         "and then?", [], "22222222-2222-2222-2222-222222222222", None
     )
+
+
+def test_chat_returns_friendly_reply_when_cost_cap_exceeded():
+    # cost_guard.CostCapExceeded is deliberately left uncaught everywhere
+    # below this (so a cap breach can't be silently swallowed mid-call) --
+    # this is the one place it should be caught, so a cap breach degrades
+    # to an honest, distinct chat reply instead of a raw 500 that looks
+    # identical to every other failure.
+    with patch("app.api.chat.ConversationAgent.respond", new_callable=AsyncMock) as mock_respond:
+        mock_respond.side_effect = cost_guard.CostCapExceeded("cap hit")
+        response = client.post("/chat", json={
+            "message": "hi",
+            "conversation_history": [],
+            "anonymous_id": "44444444-4444-4444-4444-444444444444",
+        })
+    assert response.status_code == 200
+    assert "usage limit" in response.json()["reply"]
 
 
 def test_chat_missing_anonymous_id_returns_422():

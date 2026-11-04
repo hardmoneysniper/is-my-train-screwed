@@ -17,6 +17,7 @@ from scripts.hourly_bus_sync import (
     coverage_complete,
     local_route_day_type_counts,
     real_bucket_coverage,
+    real_volume_coverage,
     sync_once,
 )
 
@@ -123,12 +124,20 @@ def test_real_bucket_coverage_measures_directly_against_reliability_buckets(tmp_
     assert coverage["Q70+"]["weekday"] == (1, 1)
 
 
+def _identity_period_mapping(route_id, day_type, hour):
+    return (day_type, hour)
+
+
 def test_real_bucket_coverage_excludes_the_2am_to_4am_window(tmp_path):
     # 2026-10-12 (user): risk_engine.py never cites a bus bucket in the
     # 2:00am-3:59am window ("almost nobody rides a bus at 2am") --
     # tracking coverage for it here would just be noise. 4am itself
     # (hour_bucket=4) must NOT be excluded -- "people start riding
     # buses/subways at 4am to catch early flights and go to work."
+    # bus_schedule_periods.effective_day_type_and_hour is mocked as an
+    # identity mapping here so the stored hour_bucket IS the literal hour
+    # for this test -- see the next test for the real-world case where
+    # it isn't (2026-10-25 fix).
     db_path = tmp_path / "local_pipeline.sqlite3"
     conn = get_connection(str(db_path))
     try:
@@ -141,10 +150,116 @@ def test_real_bucket_coverage_excludes_the_2am_to_4am_window(tmp_path):
         conn.close()
 
     with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
-         patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]), \
+         patch("scripts.hourly_bus_sync.bus_schedule_periods.effective_day_type_and_hour", side_effect=_identity_period_mapping):
         coverage = real_bucket_coverage()
 
     assert coverage["M60+"]["weekday"] == (2, 2)
+
+
+def test_real_bucket_coverage_excludes_the_real_mapped_late_night_period_not_the_literal_hour(tmp_path):
+    # 2026-10-25 real bug fix: a stored bus hour_bucket is a PERIOD INDEX
+    # (bus_schedule_periods' own cluster numbering), not a literal hour --
+    # confirmed live for B15, whose real 2am-equivalent weekend period is
+    # stored as hour_bucket=1, not 2. The old filter compared the stored
+    # value directly against literal 2/3 and so never excluded it,
+    # making B15 weekend coverage look stuck at a mysterious 0% forever
+    # when the real story is just "all its real weekend buckets live in
+    # one inherently low-traffic late-night period." This test pins the
+    # fix: literal hours 2 and 3 both map to period hour_bucket=1 here,
+    # and that's the value that must get excluded, not 2 or 3 themselves.
+    db_path = tmp_path / "local_pipeline.sqlite3"
+    conn = get_connection(str(db_path))
+    try:
+        # This bucket IS the real late-night period (stored as 1) -- must
+        # be excluded even though its literal stored value isn't 2 or 3.
+        _insert_bucket(conn, "B15", "weekend", n_observations=17, stop_id="s1", hour_bucket=1)
+        # A normal daytime period, stored as some other value, counts normally.
+        _insert_bucket(conn, "B15", "weekend", n_observations=80, stop_id="s2", hour_bucket=8)
+    finally:
+        conn.close()
+
+    def fake_mapping(route_id, day_type, hour):
+        if hour in (2, 3):
+            return (day_type, 1)
+        return (day_type, hour)
+
+    with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["B15"]), \
+         patch("scripts.hourly_bus_sync.bus_schedule_periods.effective_day_type_and_hour", side_effect=fake_mapping):
+        coverage = real_bucket_coverage()
+
+    assert coverage["B15"]["weekend"] == (1, 1)
+
+
+def test_real_volume_coverage_weights_by_observation_count_not_bucket_count(tmp_path):
+    # 2026-10-20 (user): a second lens for fine-grained-grid routes whose
+    # distinct-bucket-count metric looks stuck -- one high-traffic bucket
+    # can dominate a route's real volume even while many low-traffic
+    # buckets remain individually uncleared.
+    db_path = tmp_path / "local_pipeline.sqlite3"
+    conn = get_connection(str(db_path))
+    try:
+        # One already-citable bucket carries almost all real traffic;
+        # four more real buckets exist but are each thin and uncleared.
+        _insert_bucket(conn, "Q102", "weekday", n_observations=400, stop_id="s1")
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s2")
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s3")
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s4")
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s5")
+    finally:
+        conn.close()
+
+    with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["Q102"]):
+        bucket_coverage = real_bucket_coverage()
+        volume_coverage = real_volume_coverage()
+
+    # Bucket-count view: only 1 of 5 real buckets clears the gate (20%).
+    assert bucket_coverage["Q102"]["weekday"] == (1, 5)
+    # Volume view: that one bucket is 400 of the real 420 observations (95%).
+    assert volume_coverage["Q102"]["weekday"] == (400, 420)
+
+
+def test_real_volume_coverage_excludes_the_2am_to_4am_window(tmp_path):
+    db_path = tmp_path / "local_pipeline.sqlite3"
+    conn = get_connection(str(db_path))
+    try:
+        _insert_bucket(conn, "M60+", "weekday", n_observations=200, stop_id="s1", hour_bucket=2)
+        _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s2", hour_bucket=8)
+    finally:
+        conn.close()
+
+    with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]), \
+         patch("scripts.hourly_bus_sync.bus_schedule_periods.effective_day_type_and_hour", side_effect=_identity_period_mapping):
+        coverage = real_volume_coverage()
+
+    assert coverage["M60+"]["weekday"] == (80, 80)
+
+
+def test_real_volume_coverage_excludes_the_real_mapped_late_night_period_not_the_literal_hour(tmp_path):
+    # Same 2026-10-25 fix as real_bucket_coverage's equivalent test, for
+    # the volume-weighted view.
+    db_path = tmp_path / "local_pipeline.sqlite3"
+    conn = get_connection(str(db_path))
+    try:
+        _insert_bucket(conn, "B15", "weekend", n_observations=17, stop_id="s1", hour_bucket=1)
+        _insert_bucket(conn, "B15", "weekend", n_observations=80, stop_id="s2", hour_bucket=8)
+    finally:
+        conn.close()
+
+    def fake_mapping(route_id, day_type, hour):
+        if hour in (2, 3):
+            return (day_type, 1)
+        return (day_type, hour)
+
+    with patch("scripts.hourly_bus_sync.LOCAL_PIPELINE_DB_PATH", db_path), \
+         patch("scripts.hourly_bus_sync.CORRIDORS", ["B15"]), \
+         patch("scripts.hourly_bus_sync.bus_schedule_periods.effective_day_type_and_hour", side_effect=fake_mapping):
+        coverage = real_volume_coverage()
+
+    assert coverage["B15"]["weekend"] == (80, 80)
 
 
 def test_coverage_complete_is_false_for_a_corridor_with_no_real_buckets():

@@ -1,4 +1,5 @@
 # backend/tests/test_conversation_agent.py
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
@@ -92,6 +93,51 @@ def no_pending_notifications_by_default(monkeypatch):
         "app.agents.conversation_agent.claim_pending_notifications",
         MagicMock(return_value=[]),
     )
+
+
+@pytest.mark.asyncio
+async def test_wakes_otp_on_first_message_of_a_new_conversation():
+    # 2026-10-15 (user): wake OTP the moment a NEW conversation starts
+    # (empty history), fire-and-forget, so the cold start happens while
+    # the user reads the reply and types their next message -- same
+    # overrides the autouse _otp_always_awake fixture to assert the call
+    # actually happened, not just that it resolved true.
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Hi, where are you headed?")],
+        usage=_fake_usage(),
+    )
+    with patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock) as mock_wake, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(return_value=final_response)
+
+        agent = ConversationAgent()
+        await agent.respond("hi", conversation_history=[], anonymous_id="anon-1")
+        await asyncio.sleep(0)  # let the fire-and-forget task actually run
+
+    mock_wake.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_does_not_wake_otp_again_for_a_returning_user():
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="ok")],
+        usage=_fake_usage(),
+    )
+    with patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock) as mock_wake, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(return_value=final_response)
+
+        agent = ConversationAgent()
+        await agent.respond(
+            "ok", conversation_history=[{"role": "user", "content": "earlier"}], anonymous_id="anon-1"
+        )
+        await asyncio.sleep(0)
+
+    mock_wake.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1195,92 @@ async def test_find_address_tool_passes_through_none_on_no_match(monkeypatch):
 
     tool_result_content = captured_messages[1][-1]["content"][0]["content"]
     assert tool_result_content == "null"
+
+
+# --- find_place tool dispatch (2026-10-17) ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_find_place_tool_dispatches_to_find_place(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("find_place", {"query": "the zara on 21st st"})
+        return _text_response("Found it.")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.resolve_location_description",
+        AsyncMock(return_value="Zara, Manhattan"),
+    )
+    mock_find_place = AsyncMock(return_value=[{"lat": 40.7524053, "lon": -73.9700918, "formatted": "Zara Terrace, Manhattan"}])
+    monkeypatch.setattr("app.agents.conversation_agent.find_place", mock_find_place)
+
+    await agent.respond("plan from the zara on 21st st", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert "40.7524053" in tool_result_content
+    assert "Zara Terrace" in tool_result_content
+    # find_place must receive the RESOLVER's rewritten string, not the
+    # user's raw wording -- the whole point of the resolver step.
+    mock_find_place.assert_awaited_once_with("Zara, Manhattan")
+
+
+@pytest.mark.asyncio
+async def test_find_place_tool_passes_through_none_on_no_match(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("find_place", {"query": "somewhere nonexistent"})
+        return _text_response("Couldn't find that — try a stop name or address?")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.resolve_location_description",
+        AsyncMock(return_value="somewhere nonexistent"),
+    )
+    monkeypatch.setattr("app.agents.conversation_agent.find_place", AsyncMock(return_value=[]))
+
+    await agent.respond("plan from somewhere nonexistent", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert tool_result_content == "[]"
+
+
+@pytest.mark.asyncio
+async def test_find_place_tool_surfaces_multiple_candidates(monkeypatch):
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response("find_place", {"query": "zara"})
+        return _text_response("Which one did you mean?")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.resolve_location_description", AsyncMock(return_value="Zara, Manhattan")
+    )
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.find_place",
+        AsyncMock(return_value=[
+            {"lat": 40.7110715, "lon": -74.0086261, "formatted": "Zara, 222 Broadway, Manhattan"},
+            {"lat": 40.7743876, "lon": -73.9825127, "formatted": "Zara, 1963 Broadway, Manhattan"},
+        ]),
+    )
+
+    await agent.respond("plan from zara", [], "anon-1")
+
+    tool_result_content = captured_messages[1][-1]["content"][0]["content"]
+    assert "222 Broadway" in tool_result_content
+    assert "1963 Broadway" in tool_result_content
 
 
 # --- Task 6: mid-trip destination change ------------------------------------

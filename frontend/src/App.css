@@ -87,6 +87,16 @@ body {
   border-bottom-left-radius: 4px;
 }
 
+.typing-indicator {
+  /* Fixed width (not just min-width) so the bubble doesn't visibly resize
+     on every 300ms tick as the dot count cycles 1 -> 2 -> 3 -> 1. Sized to
+     fit "..." at this font/padding plus a little slack. */
+  width: 46px;
+  text-align: center;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+}
+
 .bubble-footer {
   /* Task 11 citation footer: a trailing "*...*" line, rendered distinctly
      from the body -- smaller, italic, muted -- rather than as plain text.

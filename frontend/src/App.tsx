@@ -35,9 +35,25 @@ export default function App() {
   const [messages, setMessages] = useState<DisplayMessage[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [dotCount, setDotCount] = useState(1)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const started = messages.length > 0
+
+  // Cycles 1 -> 2 -> 3 -> 1... while waiting on a reply, rendered as
+  // "." / ".." / "..." below. Fast (300ms/step) since this is standing in
+  // for a potentially long wait (e.g. an OTP cold start up to ~40s) and
+  // needs to read as "alive," not as a slow pulse.
+  useEffect(() => {
+    if (!sending) {
+      setDotCount(1)
+      return
+    }
+    const interval = setInterval(() => {
+      setDotCount((prev) => (prev % 3) + 1)
+    }, 300)
+    return () => clearInterval(interval)
+  }, [sending])
 
   // Auto-grow the composer to fit its content (up to the CSS max-height
   // cap in App.css, where it switches to an internal scrollbar instead).
@@ -117,6 +133,11 @@ export default function App() {
               </div>
             )
           })}
+          {sending && (
+            <div className="bubble bubble-assistant typing-indicator">
+              {'.'.repeat(dotCount)}
+            </div>
+          )}
         </div>
       )}
 

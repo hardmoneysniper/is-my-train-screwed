@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     # config field ready rather than a hardcoded model string (per the
     # Global Constraint that model choice is never hardcoded).
     replan_agent_model: str = "claude-haiku-4-5-20251001"
+    # app/location_resolver.py's pre-geocoding query normalizer (2026-10-17,
+    # user's explicit choice of Sonnet over Haiku here: resolving a vague/
+    # colloquial NYC place reference into a geocoder-friendly search string
+    # is a more judgment-heavy NLU task than this product's other Haiku-
+    # handled steps). Sonnet, not Opus/flagship -- CLAUDE.md's model-tier
+    # rule only bans Opus/flagship, not Sonnet.
+    location_resolver_model: str = "claude-sonnet-5"
     db_path: str = str(Path(__file__).parent.parent / "data" / "risk.sqlite3")
     # Not read by any Python code path yet -- the deployment's uvicorn
     # invocation reads $PORT from the environment directly. Documented here
@@ -24,6 +31,10 @@ class Settings(BaseSettings):
     # (Task 10 brief).
     port: int = 8000
     geoclient_api_key: str = ""
+    # app/find_place.py's third-tier location fallback (after find_stop and
+    # find_address both return no match) -- resolves a free-text business/
+    # landmark name via Geoapify's Geocoding API. User-supplied 2026-10-17.
+    geoapify_api_key: str = ""
     # Lets backend wake/stop the otp service on demand (app/otp_lifecycle.py,
     # 2026-10-11) via Railway's GraphQL API -- reuses the same personal
     # account token already used for this project's deploy/ops tooling

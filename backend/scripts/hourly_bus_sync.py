@@ -38,6 +38,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from app import bus_schedule_periods  # noqa: E402
 from app.day_type import day_type_for  # noqa: E402
 from app.risk_engine import LATE_NIGHT_SUPPRESSED_HOURS, MIN_N_OBSERVATIONS  # noqa: E402
 from collectors.bus_collector import CORRIDORS  # noqa: E402
@@ -228,6 +229,32 @@ def categorize_bus_data() -> None:
         conn.close()
 
 
+def _late_night_period_keys(route: str) -> set[tuple[str, int]]:
+    """Real (day_type, hour_bucket) keys that correspond to a literal
+    risk_engine.LATE_NIGHT_SUPPRESSED_HOURS hour for this specific route,
+    after bus_schedule_periods' period-clustering and weekend/weekday
+    merge -- reconstructs the same mapping risk_engine._is_late_night_bus
+    relies on in production (it checks the real literal hour BEFORE that
+    mapping, see its neighboring comment in _compute_transfer_risk), since
+    this reporting-only proxy only has the ALREADY-mapped stored
+    hour_bucket column to filter against.
+
+    2026-10-25 real fix: the previous version filtered the stored
+    hour_bucket column directly against the literal values 2/3 -- which
+    almost never matches, since a stored bus hour_bucket is a PERIOD
+    INDEX (bus_schedule_periods' own cluster numbering), not a literal
+    hour. Confirmed live: B15's real 2am-equivalent weekend period is
+    stored as hour_bucket=1, not 2 -- so the old filter wasn't excluding
+    it at all, and its "stuck at 0%" weekend coverage looked like a
+    mystery when the real story is simpler (see real_bucket_coverage's
+    docstring)."""
+    return {
+        bus_schedule_periods.effective_day_type_and_hour(route, day_type, h)
+        for day_type in ("weekday", "weekend")
+        for h in LATE_NIGHT_SUPPRESSED_HOURS
+    }
+
+
 def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
     """{route: {day_type: (buckets_cleared, real_buckets_total)}} measured
     directly from local_pipeline.sqlite3's reliability_buckets -- the
@@ -235,38 +262,84 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
     raw-record proxy for it. Call categorize_bus_data() first so this
     reflects the latest synced data.
 
-    Excludes hour_bucket in risk_engine.LATE_NIGHT_SUPPRESSED_HOURS
-    (2026-10-12, user: "almost nobody rides a bus at 2am thus almost
-    nobody is using our service" for it) -- risk_engine.py never cites
-    these buckets (see its _is_late_night_bus), so tracking "coverage"
-    for them here would just be noise that drags down a route's real
-    completion status over slots nobody will ever see a probability
-    for. Approximate for bus: a stored hour_bucket is the period-mapped
-    (not literal) hour, so this excludes whichever PERIOD a suppressed
-    literal hour happens to land on -- coarse, but consistent with
-    every other policy choice in this file (same spirit as
-    PERIOD_MERGE_TOLERANCE), not worth a more precise literal-hour
-    reconstruction for a 2-hour window."""
+    Excludes real late-night buckets (2026-10-12, user: "almost nobody
+    rides a bus at 2am thus almost nobody is using our service" for it,
+    via _late_night_period_keys -- see its docstring for the 2026-10-25
+    fix making this exclusion actually match production's real
+    suppression instead of comparing against the wrong kind of hour
+    value) -- risk_engine.py never cites these buckets (see its
+    _is_late_night_bus), so tracking "coverage" for them here would just
+    be noise that drags down a route's real completion status over slots
+    nobody will ever see a probability for."""
     conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
-    exclude_placeholders = ",".join("?" for _ in LATE_NIGHT_SUPPRESSED_HOURS)
     try:
         coverage: dict[str, dict[str, tuple[int, int]]] = {}
         for route in CORRIDORS:
+            excluded_keys = _late_night_period_keys(route)
             coverage[route] = {}
             for day_type in ("weekday", "weekend"):
                 rows = conn.execute(
-                    f"""
-                    SELECT n_observations FROM reliability_buckets
+                    """
+                    SELECT hour_bucket, n_observations FROM reliability_buckets
                     WHERE agency = 'bus' AND route_id = ? AND day_type = ?
                       AND stat_type IN ('headway', 'prediction_error')
                       AND n_observations > 0
-                      AND hour_bucket NOT IN ({exclude_placeholders})
                     """,
-                    (route, day_type, *LATE_NIGHT_SUPPRESSED_HOURS),
+                    (route, day_type),
                 ).fetchall()
-                total = len(rows)
-                cleared = sum(1 for r in rows if r[0] >= MIN_N_OBSERVATIONS)
+                kept = [r[1] for r in rows if (day_type, r[0]) not in excluded_keys]
+                total = len(kept)
+                cleared = sum(1 for n in kept if n >= MIN_N_OBSERVATIONS)
                 coverage[route][day_type] = (cleared, total)
+        return coverage
+    finally:
+        conn.close()
+
+
+def real_volume_coverage() -> dict[str, dict[str, tuple[float, float]]]:
+    """{route: {day_type: (citable_n_sum, total_n_sum)}} -- the same real
+    buckets real_bucket_coverage() looks at, but weighted by how many real
+    observations each bucket actually holds instead of counting every
+    bucket equally.
+
+    2026-10-20 (user): added as a second lens for routes whose
+    distinct-bucket-count metric looks "stuck" for days at a time (e.g.
+    Q102: 486 real bucket combinations to fill from ~1,200 events/day,
+    so most days nudge many already-low buckets up a little without any
+    of them crossing n=50) -- that metric is legitimately slow-moving for
+    a fine-grained route, not broken, but it also isn't what a rider
+    actually experiences: a handful of high-traffic buckets can already
+    cover most of a route's real query volume even while hundreds of
+    low-traffic buckets remain stuck under the threshold. This counts
+    observations, not buckets, so the routes/stops riders actually hit
+    most dominate the percentage -- matches CLAUDE.md's 2026-10-12 note
+    that this view already showed M60+/B15/Q90 well above 90% "real
+    observation volume already landing in a citable bucket" even when
+    the distinct-bucket metric said otherwise. Does not change
+    coverage_complete()'s stop decision -- that stays bucket-count based
+    (the established, conservative policy) -- this is additional
+    reporting only. Excludes real late-night buckets the same way
+    real_bucket_coverage() does (see _late_night_period_keys)."""
+    conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
+    try:
+        coverage: dict[str, dict[str, tuple[float, float]]] = {}
+        for route in CORRIDORS:
+            excluded_keys = _late_night_period_keys(route)
+            coverage[route] = {}
+            for day_type in ("weekday", "weekend"):
+                rows = conn.execute(
+                    """
+                    SELECT hour_bucket, n_observations FROM reliability_buckets
+                    WHERE agency = 'bus' AND route_id = ? AND day_type = ?
+                      AND stat_type IN ('headway', 'prediction_error')
+                      AND n_observations > 0
+                    """,
+                    (route, day_type),
+                ).fetchall()
+                kept = [r[1] for r in rows if (day_type, r[0]) not in excluded_keys]
+                total_n = sum(kept)
+                citable_n = sum(n for n in kept if n >= MIN_N_OBSERVATIONS)
+                coverage[route][day_type] = (citable_n, total_n)
         return coverage
     finally:
         conn.close()
@@ -357,5 +430,17 @@ if __name__ == "__main__":
             cleared, total = coverage.get(route, {}).get(day_type, (0, 0))
             pct = (cleared / total * 100) if total else 0.0
             print(f"[hourly-bus-sync] coverage {route} {day_type}: {cleared}/{total} buckets >= n={MIN_N_OBSERVATIONS} ({pct:.0f}%)", flush=True)
+
+    # Second lens (2026-10-20): same real data, weighted by observation
+    # volume instead of distinct-bucket count -- see real_volume_coverage()
+    # docstring for why this reads very differently for fine-grained-grid
+    # routes. Reporting only, does not affect the stop decision above.
+    volume_coverage = real_volume_coverage()
+    for route in CORRIDORS:
+        for day_type in ("weekday", "weekend"):
+            citable_n, total_n = volume_coverage.get(route, {}).get(day_type, (0, 0))
+            pct = (citable_n / total_n * 100) if total_n else 0.0
+            print(f"[hourly-bus-sync] volume-coverage {route} {day_type}: {citable_n:.0f}/{total_n:.0f} observations in citable buckets ({pct:.0f}%)", flush=True)
+
     if stopped:
         print("[hourly-bus-sync] all corridors cleared real bucket coverage, wrote stop marker to Railway", flush=True)
