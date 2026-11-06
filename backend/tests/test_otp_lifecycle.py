@@ -76,10 +76,26 @@ def test_mark_otp_used_sets_last_used_timestamp():
 
 
 @pytest.mark.asyncio
-async def test_stop_otp_if_idle_noop_when_never_used():
-    with patch("app.otp_lifecycle._railway_graphql", new_callable=AsyncMock) as mock_gql:
+async def test_stop_otp_if_idle_noop_when_never_used_and_unreachable():
+    with patch("app.otp_lifecycle.is_otp_reachable", new_callable=AsyncMock, return_value=False), \
+         patch("app.otp_lifecycle._railway_graphql", new_callable=AsyncMock) as mock_gql:
         await otp_lifecycle.stop_otp_if_idle()
-    mock_gql.assert_not_called()
+    mock_gql.assert_not_called()  # nothing running -- nothing to stop
+
+
+@pytest.mark.asyncio
+async def test_stop_otp_if_idle_stops_when_never_used_but_already_running():
+    # Regression test for a real 2026-11-06 cost incident: a `backend`
+    # redeploy resets `_last_used_at` to None in the new process even
+    # though otp (deployed independently) was already running from
+    # before -- this must still get stopped, not left running forever
+    # just because THIS process never personally used it.
+    with patch("app.otp_lifecycle.is_otp_reachable", new_callable=AsyncMock, return_value=True), \
+         patch("app.otp_lifecycle._current_otp_deployment_id", new_callable=AsyncMock, return_value="dep-1"), \
+         patch("app.otp_lifecycle._railway_graphql", new_callable=AsyncMock) as mock_gql:
+        await otp_lifecycle.stop_otp_if_idle()
+    mock_gql.assert_awaited_once()
+    assert "deploymentStop" in mock_gql.call_args.args[0]
 
 
 @pytest.mark.asyncio

@@ -117,13 +117,24 @@ async def ensure_otp_awake() -> bool:
 async def stop_otp_if_idle() -> None:
     """Called periodically (main.py's lifespan). Only stops otp if it's
     both idle AND actually currently running -- querying its real
-    deployment id fresh each time since a prior wake/stop changes it, and
-    skipping entirely (no Railway call at all) when nothing has used OTP
-    yet this process lifetime, matching "only up and run if a routing
-    request is made" for a cold start too."""
-    if _last_used_at is None:
-        return
-    if time.monotonic() - _last_used_at < IDLE_STOP_AFTER_SECONDS:
+    deployment id fresh each time since a prior wake/stop changes it.
+
+    `_last_used_at is None` does NOT mean "skip, nothing could possibly be
+    running" -- it only means nothing has used OTP yet in THIS process's
+    lifetime. Every `backend` redeploy starts a fresh process with
+    `_last_used_at` reset to None, independent of whether otp itself was
+    already running from before that redeploy (it almost always is, since
+    they deploy independently). Treating None as "don't even check" left
+    an already-awake otp running indefinitely across backend restarts
+    with no real routing demand -- a real cost incident found 2026-11-06
+    (otp measured running continuously for days at ~2GB, instead of
+    sleeping after 10 idle minutes like the design intends). Falling
+    through to the reachability check below instead means: if nothing in
+    this process knows of a reason to keep it up, and it's actually up,
+    stop it -- consistent with "only up and run if a routing request is
+    made," just evaluated honestly across process restarts instead of
+    only within one."""
+    if _last_used_at is not None and time.monotonic() - _last_used_at < IDLE_STOP_AFTER_SECONDS:
         return
     if not await is_otp_reachable():
         return  # already stopped -- nothing to do
