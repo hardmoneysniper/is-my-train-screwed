@@ -45,12 +45,11 @@ decisions, not arbitrary choices made while coding):
 """
 import json
 import math
-import pathlib
 import sqlite3
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app import bus_schedule_periods
+from app import bus_schedule_periods, gtfs_paths
 from app.day_type import day_type_for
 from app.models.risk import TransferRisk
 from app.models.transit import Itinerary, Leg
@@ -167,17 +166,6 @@ _MODE_TO_AGENCY = {
     # given the source data, not a gap to special-case.
 }
 
-_GTFS_DIR = pathlib.Path(__file__).parent.parent / "data" / "gtfs"
-_GTFS_ZIP_NAMES = [
-    "subway.zip",
-    "bus.zip",
-    "bus_manhattan.zip",
-    "bus_bronx.zip",
-    "bus_brooklyn.zip",
-    "bus_queens.zip",
-    "bus_staten_island.zip",
-    "ferry.zip",
-]
 _default_route_index_cache: RouteIndex | None = None
 
 
@@ -189,7 +177,7 @@ def _default_route_index() -> RouteIndex:
     touching this."""
     global _default_route_index_cache
     if _default_route_index_cache is None:
-        _default_route_index_cache = RouteIndex.from_gtfs(_GTFS_DIR / name for name in _GTFS_ZIP_NAMES)
+        _default_route_index_cache = RouteIndex.from_gtfs(gtfs_paths.GTFS_DIR / name for name in gtfs_paths.ALL_ZIP_NAMES)
     return _default_route_index_cache
 
 

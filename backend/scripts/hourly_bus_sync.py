@@ -45,13 +45,12 @@ from collectors.bus_collector import CORRIDORS  # noqa: E402
 from db import get_connection  # noqa: E402
 from scripts.aggregate_reliability_buckets import run_aggregate  # noqa: E402
 from scripts.derive_bus_arrival_events import run_derive as derive_bus_arrival_events_run_derive  # noqa: E402
+from scripts.railway_ids import BACKEND_SERVICE_ID, ENVIRONMENT_ID, PROJECT_ID  # noqa: E402
 
 LOCAL_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
 LOCAL_PIPELINE_DB_PATH = Path(__file__).parent.parent / "data" / "local_pipeline.sqlite3"
 
-PROJECT_ID = "77096939-d30b-46a4-b439-c545aff3fe25"
-SERVICE_ID = "f66ebb7b-778d-4041-bde9-d66ce5c17223"  # backend
-ENVIRONMENT_ID = "95c28f31-9ee7-465f-9046-034215422795"
+SERVICE_ID = BACKEND_SERVICE_ID
 REMOTE_BUS_DIR = "/app/data/raw/bus"
 REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
 

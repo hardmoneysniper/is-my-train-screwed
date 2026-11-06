@@ -8,6 +8,8 @@ from shapely.geometry import Point
 from shapely.ops import transform
 import pyproj
 
+from app import gtfs_paths
+
 
 # UTM zone 18N covers NYC and is equidistant (unlike Web Mercator/EPSG:3857,
 # whose scale factor is sec(latitude) -- ~1.32x at NYC's ~40.7N, which was
@@ -103,18 +105,6 @@ class StopIndex:
         return results
 
 
-_GTFS_DIR = pathlib.Path(__file__).parent.parent.parent / "data" / "gtfs"
-_GTFS_ZIP_NAMES = [
-    "subway.zip",
-    "bus.zip",
-    "bus_manhattan.zip",
-    "bus_bronx.zip",
-    "bus_brooklyn.zip",
-    "bus_queens.zip",
-    "bus_staten_island.zip",
-    "ferry.zip",
-]
-
 _stop_index: StopIndex | None = None
 
 
@@ -125,6 +115,6 @@ def get_stop_index() -> StopIndex:
     reused on every call after."""
     global _stop_index
     if _stop_index is None:
-        zip_paths = [_GTFS_DIR / name for name in _GTFS_ZIP_NAMES]
+        zip_paths = [gtfs_paths.GTFS_DIR / name for name in gtfs_paths.ALL_ZIP_NAMES]
         _stop_index = StopIndex.from_gtfs_zips(zip_paths)
     return _stop_index

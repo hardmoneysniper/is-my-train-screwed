@@ -27,15 +27,10 @@ Costly to compute (parses the real GTFS zips), so cached per
 """
 import csv
 import io
-import pathlib
 import zipfile
 from collections import defaultdict
 
-GTFS_DIR = pathlib.Path(__file__).parent.parent / "data" / "gtfs"
-BUS_ZIP_NAMES = [
-    "bus.zip", "bus_bronx.zip", "bus_brooklyn.zip",
-    "bus_manhattan.zip", "bus_queens.zip", "bus_staten_island.zip",
-]
+from app.gtfs_paths import BUS_ZIP_NAMES, GTFS_DIR
 
 ANCHOR_HOUR = 5  # a real, common overnight-to-early-morning service
 # transition point for NYC bus schedules -- not a universal rush/midday

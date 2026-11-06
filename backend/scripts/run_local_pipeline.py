@@ -45,13 +45,9 @@ from scripts.ingest_subwaydata import (  # noqa: E402
     build_static_stop_times_index,
     run_ingest as ingest_subwaydata_run_ingest,
 )
+from scripts.railway_ids import BACKEND_SERVICE_ID, ENVIRONMENT_ID, PROJECT_ID  # noqa: E402
 
-# Same Railway project this whole codebase already talks to (see
-# CLAUDE.md and backup_from_railway.py for precedent of this exact
-# project/service/environment triple).
-PROJECT_ID = "77096939-d30b-46a4-b439-c545aff3fe25"
-SERVICE_ID = "f66ebb7b-778d-4041-bde9-d66ce5c17223"  # backend
-ENVIRONMENT_ID = "95c28f31-9ee7-465f-9046-034215422795"
+SERVICE_ID = BACKEND_SERVICE_ID
 
 DEFAULT_BUS_RAW_DIR = Path(__file__).parent.parent / "data" / "raw" / "bus"
 DEFAULT_SUBWAY_RAW_DIR = Path(__file__).parent.parent / "data" / "raw" / "subway"
