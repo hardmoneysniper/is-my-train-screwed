@@ -1,10 +1,50 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import App from './App'
+import { subscribeToPush } from './push'
+
+vi.mock('./push', () => ({ subscribeToPush: vi.fn() }))
+
+function mockChatReply(reply: string) {
+  return vi.spyOn(global, 'fetch').mockResolvedValue({ ok: true, json: async () => ({ reply }) } as Response)
+}
+
+function dispatchBeforeInstallPrompt(outcome: 'accepted' | 'dismissed' = 'accepted') {
+  const event = new Event('beforeinstallprompt', { cancelable: true }) as Event & {
+    prompt: () => Promise<void>
+    userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+  }
+  event.prompt = vi.fn().mockResolvedValue(undefined)
+  event.userChoice = Promise.resolve({ outcome })
+  window.dispatchEvent(event)
+  return event
+}
+
+async function sendOneMessage(text = 'How do I get to Lex/63?') {
+  fireEvent.change(screen.getByPlaceholderText(/ask (about a trip|any follow up questions)/i), {
+    target: { value: text },
+  })
+  fireEvent.click(screen.getByText(/send/i))
+  await waitFor(() => {
+    expect(screen.getByText(/take the f train/i)).toBeInTheDocument()
+  })
+}
 
 describe('App', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    // restoreAllMocks only resets vi.spyOn spies -- it does NOT clear
+    // call history on the module-level vi.fn() from the ./push mock
+    // factory above, so without this a later test could see a call
+    // count left over from an earlier test (caught live: the dismissed-
+    // outcome test below was failing because an EARLIER test's
+    // subscribeToPush call was still "remembered").
+    vi.clearAllMocks()
+    localStorage.clear()
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0',
+      configurable: true,
+    })
   })
 
   it('shows the centered hero title and an input before any message is sent', () => {
@@ -200,5 +240,130 @@ describe('App', () => {
     expect(screen.getByText(/option a is 30%\* risky, option b is 12%\* risky\./i)).toBeInTheDocument()
     // Exactly one footer element for the whole message.
     expect(document.querySelectorAll('.bubble-footer')).toHaveLength(1)
+  })
+
+  describe('install prompt', () => {
+    it('shows an install bubble with a working Install button after the first reply, on a browser with a native prompt', async () => {
+      mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      const installEvent = dispatchBeforeInstallPrompt() // after render -- App's useEffect must be mounted to catch it
+      await sendOneMessage()
+
+      expect(screen.getByText(/want real-time disruption alerts/i)).toBeInTheDocument()
+      expect(screen.getByText(/not an app/i)).toBeInTheDocument()
+      const button = screen.getByRole('button', { name: /install/i })
+
+      fireEvent.click(button)
+
+      expect(installEvent.prompt).toHaveBeenCalledTimes(1)
+      // subscribeToPush only fires after installEvent.userChoice resolves
+      // ('accepted' by default from dispatchBeforeInstallPrompt), which
+      // happens on a later microtask than the click itself.
+      await waitFor(() => {
+        expect(subscribeToPush).toHaveBeenCalledTimes(1)
+      })
+      expect(subscribeToPush).toHaveBeenCalledWith(expect.any(String))
+    })
+
+    it('does not send the install-prompt bubble text back as conversation_history on the next message', async () => {
+      // Regression test, caught on review: the install bubble is local
+      // UI chrome (kind: 'install'), not something the assistant said --
+      // it must never be sent back to the backend as if it were a prior
+      // turn, or the LLM would think it already said that.
+      const fetchMock = mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      dispatchBeforeInstallPrompt()
+      await sendOneMessage('first message')
+      expect(screen.getByText(/want real-time disruption alerts/i)).toBeInTheDocument()
+
+      fetchMock.mockResolvedValue({ ok: true, json: async () => ({ reply: 'second reply' }) } as Response)
+      fireEvent.change(screen.getByPlaceholderText(/ask any follow up questions/i), {
+        target: { value: 'second message' },
+      })
+      fireEvent.click(screen.getByText(/send/i))
+      await waitFor(() => {
+        expect(screen.getByText('second reply')).toBeInTheDocument()
+      })
+
+      const secondCallBody = JSON.parse(fetchMock.mock.calls[1]![1]!.body as string)
+      const historyTexts: string[] = secondCallBody.conversation_history.map((m: { content: string }) => m.content)
+      expect(historyTexts.some((t) => /want real-time disruption alerts/i.test(t))).toBe(false)
+      // The real reply and the user's own message are still there --
+      // this isn't a case of the filter dropping everything.
+      expect(historyTexts).toContain('Take the F train — about 30 minutes.')
+      expect(historyTexts).toContain('first message')
+    })
+
+    it('does not subscribe to push if the rider dismisses the native install prompt', async () => {
+      mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      dispatchBeforeInstallPrompt('dismissed')
+      await sendOneMessage()
+      const button = screen.getByRole('button', { name: /install/i })
+
+      fireEvent.click(button)
+
+      // Give the dismissed-outcome branch a chance to run, then confirm
+      // it deliberately did nothing further -- asking for push
+      // permission right after the rider just said no to one popup
+      // would be a second unwanted interruption.
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: /install/i })).not.toBeInTheDocument()
+      })
+      expect(subscribeToPush).not.toHaveBeenCalled()
+    })
+
+    it('does not show the install bubble again on a second message the same day', async () => {
+      mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      dispatchBeforeInstallPrompt()
+      await sendOneMessage('first message')
+      expect(screen.getAllByText(/want real-time disruption alerts/i)).toHaveLength(1)
+
+      await sendOneMessage('second message')
+      expect(screen.getAllByText(/want real-time disruption alerts/i)).toHaveLength(1)
+    })
+
+    it('shows Share-sheet instructions with no button on iOS (no native install prompt exists there)', async () => {
+      Object.defineProperty(window.navigator, 'userAgent', {
+        value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+        configurable: true,
+      })
+      mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      await sendOneMessage()
+
+      expect(screen.getByText(/add this to your home screen/i)).toBeInTheDocument()
+      expect(screen.getByText(/not an app/i)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /install/i })).not.toBeInTheDocument()
+    })
+
+    it('shows no install bubble at all when the app is already running standalone', async () => {
+      vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: true } as MediaQueryList)
+      mockChatReply('Take the F train — about 30 minutes.')
+
+      render(<App />)
+      dispatchBeforeInstallPrompt()
+      await sendOneMessage()
+
+      expect(screen.queryByText(/want real-time disruption alerts/i)).not.toBeInTheDocument()
+    })
+
+    it('shows no install bubble on a browser with neither a native prompt nor iOS', async () => {
+      mockChatReply('Take the F train — about 30 minutes.')
+      // No beforeinstallprompt dispatched, and the default userAgent (set
+      // in beforeEach) is a plain desktop Chrome string, not iOS -- this
+      // is the "nothing this browser can act on" branch.
+
+      render(<App />)
+      await sendOneMessage()
+
+      expect(screen.queryByText(/want real-time disruption alerts/i)).not.toBeInTheDocument()
+    })
   })
 })

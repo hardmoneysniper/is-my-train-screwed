@@ -17,6 +17,7 @@ This module follows the same standalone-`app/`-module precedent as
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from app import feedback
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
 from db import get_connection
@@ -96,6 +97,13 @@ def cancel_monitored_trip(
     Returns `True` if exactly one row matched and was cancelled, else
     `False` -- covers "trip doesn't exist," "belongs to a different
     anonymous_id," and "already cancelled/completed/expired" identically.
+
+    A successful cancel also queues a post-trip feedback request
+    (Feedback Triage Agent, 2026-11-06) -- this is the "arrived at
+    destination" path for the SYSTEM_PROMPT phrases ("I'm here," "I made
+    it," "cancel this trip," "stop monitoring") that all route through
+    this same function; the TTL-expiry ("timed out") path queues its own
+    request directly in `app/trip_monitor.py`.
     """
     owns_conn = conn is None
     if owns_conn:
@@ -109,7 +117,10 @@ def cancel_monitored_trip(
             (trip_id, anonymous_id),
         )
         conn.commit()
-        return cursor.rowcount == 1
+        cancelled = cursor.rowcount == 1
+        if cancelled:
+            feedback.request_feedback(trip_id, anonymous_id, conn=conn)
+        return cancelled
     finally:
         if owns_conn:
             conn.close()

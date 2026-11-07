@@ -249,3 +249,97 @@ async def test_no_claimed_trips_skips_alerts_fetch(conn, route_index):
         "trips_replanned": 0,
         "trips_failed": 0,
     }
+
+
+# --- Test 8: an expired trip queues a feedback request (Feedback Triage ---
+# --- Agent, 2026-11-06) -- the "timed out" trip-ended case ---------------
+
+
+@pytest.mark.asyncio
+async def test_expired_trip_queues_a_feedback_request(conn, route_index):
+    trip_id = _create_trip(conn, _subway_itinerary(_past_ms(1)), anonymous_id="anon-feedback")
+
+    with patch("app.trip_monitor.fetch_subway_alerts", new_callable=AsyncMock) as mock_subway, \
+         patch("app.trip_monitor.fetch_bus_alerts", new_callable=AsyncMock) as mock_bus:
+        mock_subway.return_value = []
+        mock_bus.return_value = []
+
+        await run_monitor_cycle(conn, route_index=route_index)
+
+    row = conn.execute("SELECT * FROM feedback WHERE trip_id = ?", (trip_id,)).fetchone()
+    assert row is not None
+    assert row["anonymous_id"] == "anon-feedback"
+    assert row["asked_at"] is None  # queued, not yet delivered -- that's /chat's job
+
+
+# --- Test 9: a real reroute also sends a best-effort push notification ---
+
+
+@pytest.mark.asyncio
+async def test_replanned_trip_sends_a_push_notification(conn, route_index):
+    trip_id = _create_trip(conn, _subway_itinerary(_future_ms(2)), anonymous_id="anon-push")
+
+    with patch("app.trip_monitor.fetch_subway_alerts", new_callable=AsyncMock) as mock_subway, \
+         patch("app.trip_monitor.fetch_bus_alerts", new_callable=AsyncMock) as mock_bus, \
+         patch("app.trip_monitor.replan_trip", new_callable=AsyncMock) as mock_replan, \
+         patch("app.trip_monitor.send_push") as mock_send_push:
+        mock_subway.return_value = [_alert("a1", ["F"])]
+        mock_bus.return_value = []
+        mock_replan.return_value = "Your trip has been rerouted."
+
+        await run_monitor_cycle(conn, route_index=route_index)
+
+    # No conn kwarg -- send_push runs in a worker thread (asyncio.to_thread,
+    # see trip_monitor.py's comment on why) and must open its own
+    # connection rather than reusing this cycle's, which belongs to the
+    # main thread.
+    mock_send_push.assert_called_once_with("anon-push", "Trip update", "Your trip has been rerouted.")
+
+
+@pytest.mark.asyncio
+async def test_replanned_trip_push_runs_in_a_worker_thread_without_crashing(conn, route_index, tmp_path, monkeypatch):
+    # Real (non-mocked) integration test for the asyncio.to_thread fix:
+    # app/push.py's send_push must be safely callable from a worker
+    # thread without ever touching the main thread's sqlite3 connection
+    # (check_same_thread=True by default -- db.py's get_connection never
+    # overrides that). Points send_push's OWN internal connection at a
+    # separate tmp db (not this cycle's `conn`, and not the real local
+    # dev db) via settings.db_path, and gives it a real-looking VAPID key
+    # so it actually runs its real subscription-lookup query rather than
+    # short-circuiting on the "not configured" check.
+    import app.config as config_module
+    monkeypatch.setattr(config_module.settings, "db_path", str(tmp_path / "push_target.sqlite3"))
+    monkeypatch.setattr(config_module.settings, "vapid_private_key", "fake-key-for-this-test")
+
+    trip_id = _create_trip(conn, _subway_itinerary(_future_ms(2)), anonymous_id="anon-thread-safety")
+
+    with patch("app.trip_monitor.fetch_subway_alerts", new_callable=AsyncMock) as mock_subway, \
+         patch("app.trip_monitor.fetch_bus_alerts", new_callable=AsyncMock) as mock_bus, \
+         patch("app.trip_monitor.replan_trip", new_callable=AsyncMock) as mock_replan:
+        mock_subway.return_value = [_alert("a1", ["F"])]
+        mock_bus.return_value = []
+        mock_replan.return_value = "Your trip has been rerouted."
+
+        # Must not raise sqlite3.ProgrammingError ("SQLite objects
+        # created in a thread can only be used in that same thread") --
+        # that's exactly the bug this test guards against.
+        summary = await run_monitor_cycle(conn, route_index=route_index)
+
+    assert summary["trips_replanned"] == 1
+
+
+@pytest.mark.asyncio
+async def test_no_reroute_sends_no_push_notification(conn, route_index):
+    _create_trip(conn, _subway_itinerary(_future_ms(2)))
+
+    with patch("app.trip_monitor.fetch_subway_alerts", new_callable=AsyncMock) as mock_subway, \
+         patch("app.trip_monitor.fetch_bus_alerts", new_callable=AsyncMock) as mock_bus, \
+         patch("app.trip_monitor.replan_trip", new_callable=AsyncMock) as mock_replan, \
+         patch("app.trip_monitor.send_push") as mock_send_push:
+        mock_subway.return_value = [_alert("a1", ["F"])]
+        mock_bus.return_value = []
+        mock_replan.return_value = None  # route unchanged -- replan_trip's own "nothing to notify" case
+
+        await run_monitor_cycle(conn, route_index=route_index)
+
+    mock_send_push.assert_not_called()

@@ -23,15 +23,17 @@ missing capability (`CLAUDE.md`: "if something's missing, build what
 doesn't depend on it and flag what's blocked -- don't fake it"). This
 module triggers re-plans from the alerts feed and sweeps TTL only.
 """
+import asyncio
 import logging
 import sqlite3
 from datetime import datetime, timezone
 
-from app import risk_engine
+from app import feedback, risk_engine
 from app.agents.replan_agent import replan_trip
 from app.alerts import fetch_bus_alerts, fetch_subway_alerts
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
+from app.push import send_push
 from app.route_index import RouteIndex
 from db import claim_active_trips_for_polling, get_connection
 
@@ -113,11 +115,17 @@ async def run_monitor_cycle(conn: sqlite3.Connection | None = None, route_index:
         for trip in claimed_trips:
             try:
                 if now > trip.ttl_expires_at:
-                    # Expiry is silent cleanup, no notification (spec §6)
-                    # -- checked BEFORE the alert check so an expired trip
-                    # short-circuits even if it also has a matching alert.
+                    # Expiry is silent cleanup, no chat notification (spec
+                    # §6) -- checked BEFORE the alert check so an expired
+                    # trip short-circuits even if it also has a matching
+                    # alert. Still queues a feedback request (Feedback
+                    # Triage Agent, 2026-11-06): "timed out" is one of the
+                    # two trip-ended cases that should prompt for feedback,
+                    # the other being the "arrived"/cancel path in
+                    # app/monitoring.cancel_monitored_trip.
                     conn.execute("UPDATE monitored_trips SET status = 'expired' WHERE id = ?", (trip.id,))
                     conn.commit()
+                    feedback.request_feedback(trip.id, trip.anonymous_id, conn=conn)
                     trips_expired += 1
                     continue
 
@@ -127,6 +135,29 @@ async def run_monitor_cycle(conn: sqlite3.Connection | None = None, route_index:
                     result = await replan_trip(trip, f"alert: {matched_alert.header_text}", conn=conn)
                     if result is not None:
                         trips_replanned += 1
+                        # Best-effort real-time push, same text the rider
+                        # would otherwise only see on their next /chat
+                        # turn -- never raises, see push.send_push's own
+                        # docstring for why a delivery failure here must
+                        # not affect the pull-based path above it.
+                        #
+                        # Caught on review: send_push is a plain, blocking
+                        # `def` (pywebpush's webpush() makes a synchronous
+                        # `requests` HTTP call) -- calling it directly here
+                        # would block this entire process's single event
+                        # loop (the same one serving /chat and the OTP-
+                        # lifecycle poll) for the duration of that HTTP
+                        # call. asyncio.to_thread hands it to a worker
+                        # thread instead, same pattern main.py's own
+                        # _run_bus_collector_loop already uses for
+                        # run_forever's blocking I/O. Deliberately NOT
+                        # passed this cycle's `conn` -- a sqlite3
+                        # connection created with the default
+                        # check_same_thread=True (db.py's get_connection)
+                        # cannot be used from a different thread; letting
+                        # send_push open its own (via its conn=None
+                        # default) keeps this safe.
+                        await asyncio.to_thread(send_push, trip.anonymous_id, "Trip update", result)
                 # A trip with no matching alert simply falls through --
                 # last_checked_at was already updated atomically by the
                 # claim above, nothing further to do for a healthy trip.

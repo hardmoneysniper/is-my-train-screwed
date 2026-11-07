@@ -35,9 +35,19 @@ consistency, not re-derived) since this product's routing coverage is
 NYC-only regardless. Never raises for expected failure modes (no match,
 HTTP error) -- returns an empty list and the caller surfaces an honest
 "couldn't find that place" rather than guessing.
+
+2026-11-06: every non-empty result (including a single candidate -- see
+module docstring's own documented "Zara" vs. "Shoe Repair" failure,
+which was exactly a single, confidently-wrong top match) now also passes
+through `app.agents.location_quality_agent.check_location_matches`
+before being returned, dropping any candidate that plainly doesn't match
+what the rider described. Still never invents a coordinate -- it can
+only drop a bad candidate, never substitute one of its own (see that
+module's docstring for why).
 """
 import httpx
 
+from app.agents.location_quality_agent import check_location_matches
 from app.config import settings
 
 GEOAPIFY_URL = "https://api.geoapify.com/v1/geocode/autocomplete"
@@ -46,7 +56,17 @@ NYC_BBOX_FILTER = "rect:-74.08,40.49,-73.70,40.85"
 MAX_CANDIDATES = 5
 
 
-async def find_place(query: str) -> list[dict]:
+async def find_place(query: str, original_query: str | None = None) -> list[dict]:
+    """`query` is what's actually sent to Geoapify -- typically
+    location_resolver.py's cleaned-up rewrite, since that's what geocodes
+    reliably (see module docstring). `original_query` -- the rider's own
+    free-text description, before that rewrite -- is what the post-fetch
+    quality check compares candidates against instead, since that's the
+    real signal for rider intent; defaults to `query` when omitted, so a
+    direct call bypassing location_resolver (e.g. in tests, or a caller
+    with no separate original string) still behaves sensibly."""
+    if original_query is None:
+        original_query = query
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -73,4 +93,6 @@ async def find_place(query: str) -> list[dict]:
         if lat is None or lon is None or formatted is None:
             continue
         candidates.append({"lat": lat, "lon": lon, "formatted": formatted})
-    return candidates
+    if not candidates:
+        return candidates
+    return await check_location_matches(original_query, candidates)

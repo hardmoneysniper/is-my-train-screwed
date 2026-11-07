@@ -93,6 +93,20 @@ def no_pending_notifications_by_default(monkeypatch):
         "app.agents.conversation_agent.claim_pending_notifications",
         MagicMock(return_value=[]),
     )
+    # Feedback Triage Agent (2026-11-06): respond() now ALSO calls
+    # feedback.claim_awaiting_feedback_response at the top and
+    # feedback.claim_unasked_feedback_prompt at the bottom, against that
+    # same dummy connection -- default both to "nothing pending" (None),
+    # same reasoning as claim_pending_notifications above. Tests that DO
+    # exercise feedback capture/asking override these the same way.
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.feedback.claim_awaiting_feedback_response",
+        MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.feedback.claim_unasked_feedback_prompt",
+        MagicMock(return_value=None),
+    )
 
 
 @pytest.mark.asyncio
@@ -1224,9 +1238,12 @@ async def test_find_place_tool_dispatches_to_find_place(monkeypatch):
     tool_result_content = captured_messages[1][-1]["content"][0]["content"]
     assert "40.7524053" in tool_result_content
     assert "Zara Terrace" in tool_result_content
-    # find_place must receive the RESOLVER's rewritten string, not the
-    # user's raw wording -- the whole point of the resolver step.
-    mock_find_place.assert_awaited_once_with("Zara, Manhattan")
+    # find_place's first arg (what's actually geocoded) must be the
+    # RESOLVER's rewritten string, not the user's raw wording -- the whole
+    # point of the resolver step. Its second arg (what the post-fetch
+    # quality check compares candidates against) must be the user's own
+    # original wording instead -- see find_place.py's docstring for why.
+    mock_find_place.assert_awaited_once_with("Zara, Manhattan", "the zara on 21st st")
 
 
 @pytest.mark.asyncio
@@ -1316,3 +1333,106 @@ async def test_destination_change_cancels_trip_before_replanning(monkeypatch):
     )
 
     assert tool_call_order == ["cancel_monitored_trip"]
+
+
+# --- Feedback Triage Agent (2026-11-06) -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_captured_feedback_returns_thank_you_without_calling_the_llm():
+    with (
+        patch(
+            "app.agents.conversation_agent.feedback.claim_awaiting_feedback_response",
+            return_value={"id": 42, "raw_text": "the bus was late"},
+        ),
+        patch("app.agents.conversation_agent.triage_feedback", new_callable=AsyncMock),
+        patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls,
+        patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock) as mock_wake,
+    ):
+        agent = ConversationAgent()
+        reply = await agent.respond("the bus was late", conversation_history=[], anonymous_id="anon-1")
+        await asyncio.sleep(0)  # let the fire-and-forget triage task run
+
+    from app.agents.conversation_agent import FEEDBACK_THANK_YOU_REPLY
+    assert reply == FEEDBACK_THANK_YOU_REPLY
+    mock_anthropic_cls.return_value.messages.create.assert_not_called()
+    mock_wake.assert_not_called()  # short-circuits before the OTP wake-trigger too
+
+
+@pytest.mark.asyncio
+async def test_captured_feedback_triggers_background_triage():
+    with (
+        patch(
+            "app.agents.conversation_agent.feedback.claim_awaiting_feedback_response",
+            return_value={"id": 42, "raw_text": "the bus was late"},
+        ),
+        patch("app.agents.conversation_agent.triage_feedback", new_callable=AsyncMock) as mock_triage,
+    ):
+        agent = ConversationAgent()
+        await agent.respond("the bus was late", conversation_history=[], anonymous_id="anon-1")
+        await asyncio.sleep(0)  # let the fire-and-forget task run
+
+    mock_triage.assert_awaited_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_background_triage_failure_is_logged_not_raised(caplog):
+    with (
+        patch(
+            "app.agents.conversation_agent.feedback.claim_awaiting_feedback_response",
+            return_value={"id": 42, "raw_text": "the bus was late"},
+        ),
+        patch("app.agents.conversation_agent.triage_feedback", new_callable=AsyncMock, side_effect=RuntimeError("boom")),
+    ):
+        agent = ConversationAgent()
+        reply = await agent.respond("the bus was late", conversation_history=[], anonymous_id="anon-1")
+        await asyncio.sleep(0)  # let the fire-and-forget task run and raise internally
+
+    from app.agents.conversation_agent import FEEDBACK_THANK_YOU_REPLY
+    assert reply == FEEDBACK_THANK_YOU_REPLY  # the rider still gets their thank-you regardless
+    assert "feedback triage failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_feedback_ask_is_appended_when_a_prompt_is_claimed():
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Sure, here's your answer.")],
+        usage=_fake_usage(),
+    )
+    with (
+        patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock),
+        patch(
+            "app.agents.conversation_agent.feedback.claim_unasked_feedback_prompt",
+            return_value={"id": 1, "trip_id": 5},
+        ),
+        patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls,
+    ):
+        mock_anthropic_cls.return_value.messages.create = AsyncMock(return_value=final_response)
+        agent = ConversationAgent()
+        reply = await agent.respond("anything", conversation_history=[], anonymous_id="anon-1")
+
+    from app.agents.conversation_agent import FEEDBACK_REQUEST_TEXT
+    assert FEEDBACK_REQUEST_TEXT in reply
+    assert reply.endswith("Sure, here's your answer.")
+
+
+@pytest.mark.asyncio
+async def test_no_feedback_ask_appended_when_nothing_is_claimed():
+    # The autouse no_pending_notifications_by_default fixture already
+    # defaults claim_unasked_feedback_prompt to None -- this just makes
+    # the "no ask" case an explicit, named regression check.
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="Sure, here's your answer.")],
+        usage=_fake_usage(),
+    )
+    with (
+        patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock),
+        patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls,
+    ):
+        mock_anthropic_cls.return_value.messages.create = AsyncMock(return_value=final_response)
+        agent = ConversationAgent()
+        reply = await agent.respond("anything", conversation_history=[], anonymous_id="anon-1")
+
+    assert reply == "Sure, here's your answer."

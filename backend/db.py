@@ -125,6 +125,68 @@ CREATE INDEX IF NOT EXISTS idx_monitored_trips_anonymous_id
 -- (status, ttl_expires_at).
 CREATE INDEX IF NOT EXISTS idx_monitored_trips_poll
     ON monitored_trips (status, ttl_expires_at);
+
+-- Feedback Triage Agent (2026-11-06): one row per post-trip feedback
+-- request/response. requested_at is set the moment a trip ends
+-- (app/monitoring.cancel_monitored_trip, app/trip_monitor.py's expiry
+-- branch); asked_at is set once the request has actually been delivered
+-- in a /chat reply (pull-on-next-turn, same as pending_notification
+-- above); responded_at + raw_text are set when the rider's very next
+-- message after that delivery is captured as their feedback (see
+-- app/feedback.py's module docstring for why that capture is
+-- unconditional, not LLM-judged). quality_status/category/summary/
+-- duplicate_of/triaged_at are filled in afterward by
+-- app/agents/feedback_triage_agent.py, which also sets
+-- github_issue_number once it opens a real GitHub issue for a genuine,
+-- non-duplicate item (app/github_issues.py, 2026-11-07) -- stays NULL
+-- for a duplicate (which comments on the ORIGINAL's issue instead of
+-- opening its own, found by following duplicate_of) or if GitHub isn't
+-- configured/reachable.
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY,
+    trip_id INTEGER NOT NULL,
+    anonymous_id TEXT NOT NULL,
+    requested_at TIMESTAMP NOT NULL,
+    asked_at TIMESTAMP NULL,
+    responded_at TIMESTAMP NULL,
+    raw_text TEXT NULL,
+    quality_status TEXT NULL,
+    category TEXT NULL,
+    summary TEXT NULL,
+    duplicate_of INTEGER NULL,
+    triaged_at TIMESTAMP NULL,
+    github_issue_number INTEGER NULL
+);
+
+-- One feedback request per trip -- request_feedback() INSERT OR IGNOREs
+-- against this, so a trip that somehow triggers the request path twice
+-- (e.g. a retried write) never queues a second ask.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_trip_id ON feedback (trip_id);
+
+-- Every /chat call looks up this rider's feedback state by anonymous_id,
+-- same access pattern as idx_monitored_trips_anonymous_id above.
+CREATE INDEX IF NOT EXISTS idx_feedback_anonymous_id ON feedback (anonymous_id);
+
+-- Web Push (2026-11-06): one row per subscribed browser endpoint. endpoint
+-- is unique (not anonymous_id) because one rider can have multiple
+-- subscriptions (several devices, or a re-subscribe after clearing site
+-- data) and because the push service's own endpoint URL is already a
+-- natural stable identity for "this specific subscription" -- re-
+-- subscribing with the same endpoint upserts in place (app/push.py)
+-- rather than accumulating duplicates.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY,
+    anonymous_id TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    subscription_json TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscriptions_endpoint
+    ON push_subscriptions (endpoint);
+
+CREATE INDEX IF NOT EXISTS idx_push_subscriptions_anonymous_id
+    ON push_subscriptions (anonymous_id);
 """
 
 

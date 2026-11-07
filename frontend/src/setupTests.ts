@@ -14,3 +14,19 @@ for (const key of ['localStorage', 'sessionStorage'] as const) {
     configurable: true,
   })
 }
+
+// jsdom doesn't implement window.matchMedia at all (a long-standing gap,
+// not vitest-specific) -- App.tsx's isStandalone() calls it unconditionally,
+// so without a stub every test that sends a chat message throws inside
+// that call. `configurable: true` lets individual tests vi.spyOn/override
+// this default (e.g. to simulate an already-installed standalone PWA).
+Object.defineProperty(window, 'matchMedia', {
+  value: (query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }),
+  configurable: true,
+  writable: true,
+})

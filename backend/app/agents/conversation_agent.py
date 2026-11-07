@@ -1,6 +1,7 @@
 # backend/app/agents/conversation_agent.py
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from anthropic import AsyncAnthropic
 from app.config import settings
@@ -15,15 +16,36 @@ from app.agents.tools import (
     GET_RISK_TOOL,
     PLAN_ROUTE_TOOL,
 )
+from app.agents.feedback_triage_agent import triage_feedback
 from app.find_place import find_place
 from app.location_resolver import resolve_location_description
 from app.geocode import geocode_address
 from app.otp_lifecycle import ensure_otp_awake
 from app.models.monitoring import MonitoredTrip
 from app.models.transit import Itinerary
-from app import deadline, monitoring, risk_engine
+from app import deadline, feedback, monitoring, risk_engine
 from db import claim_pending_notifications, get_connection
 import cost_guard
+
+# Feedback Triage Agent (2026-11-06): both deterministic, plain-Python
+# strings, never LLM-authored -- same discipline as every other
+# system-composed (non-narrated) text in this product.
+FEEDBACK_REQUEST_TEXT = (
+    "How did that trip go? Reply with any quick feedback -- what worked, "
+    "what didn't -- and we'll use it to make this better."
+)
+FEEDBACK_THANK_YOU_REPLY = "Thanks for the feedback -- it really helps. Have a great day!"
+
+
+async def _run_feedback_triage(feedback_id: int) -> None:
+    """Fire-and-forget wrapper (see respond()'s capture branch below) --
+    logs a failure instead of letting it vanish as an unretrieved
+    exception on the background task, the same visibility concern
+    main.py's own basicConfig comment already raised for this service."""
+    try:
+        await triage_feedback(feedback_id)
+    except Exception:
+        logging.exception(f"feedback triage failed for feedback_id={feedback_id}")
 
 # Shared with app/agents/replan_agent.py, which formats this same footer in
 # a plain-Python (no-LLM) notification template -- see task-6-brief.md.
@@ -316,6 +338,23 @@ class ConversationAgent:
         # call. The LLM needs today's date/time to parse a stated deadline
         # ("by 6pm") into a real epoch-ms timestamp. user_location follows
         # the identical pattern, for the identical reason.
+        # Feedback capture (2026-11-06): if this rider is currently
+        # awaiting a response to a just-delivered feedback request (see
+        # the ask appended at the bottom of this method), their message
+        # IS that feedback -- unconditionally, by the user's explicit
+        # design (see app/feedback.py's module docstring for why no LLM
+        # judgment call is needed here). Short-circuits before the OTP
+        # wake-trigger and before any LLM call at all: capturing feedback
+        # costs nothing beyond a DB write plus a background triage call.
+        conn = get_connection()
+        try:
+            captured = feedback.claim_awaiting_feedback_response(conn, anonymous_id, user_message)
+        finally:
+            conn.close()
+        if captured is not None:
+            asyncio.create_task(_run_feedback_triage(captured["id"]))
+            return FEEDBACK_THANK_YOU_REPLY
+
         # 2026-10-15 (user): wake OTP the moment a user starts a NEW
         # conversation (empty history, same signal the PWA already uses
         # for "is this a first message" -- no new tracking needed),
@@ -362,8 +401,9 @@ class ConversationAgent:
                     result = await geocode_address(tool_use.input["address"])
                     content = json.dumps(result)
                 elif tool_use.name == "find_place":
-                    resolved_query = await resolve_location_description(tool_use.input["query"])
-                    place_result = await find_place(resolved_query)
+                    original_query = tool_use.input["query"]
+                    resolved_query = await resolve_location_description(original_query)
+                    place_result = await find_place(resolved_query, original_query)
                     content = json.dumps(place_result)
                 elif tool_use.name == "create_monitored_trip":
                     content = self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
@@ -398,6 +438,7 @@ class ConversationAgent:
         conn = get_connection()
         try:
             claimed = claim_pending_notifications(conn, anonymous_id)
+            feedback_prompt = feedback.claim_unasked_feedback_prompt(conn, anonymous_id)
         finally:
             conn.close()
 
@@ -406,6 +447,10 @@ class ConversationAgent:
         # back through the LLM for narration. Re-narrating it risks the
         # model paraphrasing or reformatting a citation number, which this
         # product's hard rule forbids (see CLAUDE.md). Pure string
-        # concatenation, zero new LLM calls.
+        # concatenation, zero new LLM calls. The feedback ask (if any trip
+        # ended since this rider's last /chat turn) is appended the same
+        # way -- also plain, deterministic text, never LLM-narrated.
         notification_texts = [row["pending_notification"] for row in claimed]
+        if feedback_prompt is not None:
+            notification_texts.append(FEEDBACK_REQUEST_TEXT)
         return "\n\n".join(notification_texts + [reply_text])

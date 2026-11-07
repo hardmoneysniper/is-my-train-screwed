@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # handled steps). Sonnet, not Opus/flagship -- CLAUDE.md's model-tier
     # rule only bans Opus/flagship, not Sonnet.
     location_resolver_model: str = "claude-sonnet-5"
+    # app/agents/location_quality_agent.py's post-geocode sanity check
+    # (2026-11-06) -- classifying whether a candidate plausibly matches
+    # the rider's description, not a judgment call needing Sonnet's
+    # extra reasoning tier like location_resolver_model above.
+    location_quality_model: str = "claude-haiku-4-5-20251001"
     db_path: str = str(Path(__file__).parent.parent / "data" / "risk.sqlite3")
     # Not read by any Python code path yet -- the deployment's uvicorn
     # invocation reads $PORT from the environment directly. Documented here
@@ -46,6 +51,27 @@ class Settings(BaseSettings):
     railway_project_id: str = "77096939-d30b-46a4-b439-c545aff3fe25"
     railway_otp_service_id: str = "7f4331b7-88ed-4688-8c76-b4c957017e1c"
     railway_environment_id: str = "95c28f31-9ee7-465f-9046-034215422795"
+    # app/push.py's Web Push credentials (2026-11-06) -- generated once via
+    # py_vapid, not rotated per-deploy. Empty locally/in tests (push.py's
+    # send_push no-ops without a private key; the frontend's subscribe flow
+    # simply has nothing to subscribe against without a public key).
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    # app/agents/feedback_triage_agent.py's two LLM steps (2026-11-06):
+    # quality-check (is this real feedback?) and triage (categorize,
+    # dedupe, summarize) are separate config fields per the model-choice
+    # rule even though both default to the same model today -- either
+    # could reasonably move to a different tier independently later.
+    feedback_quality_model: str = "claude-haiku-4-5-20251001"
+    feedback_triage_model: str = "claude-haiku-4-5-20251001"
+    # app/github_issues.py's Feedback Triage Agent integration (2026-11-07)
+    # -- the Issues-scoped fine-grained PAT rotated 2026-08-14 specifically
+    # for this (see the credentials table above), finally used. Empty
+    # locally/in tests -- github_issues.py's own functions no-op without
+    # both set, same "not configured -- nothing to do" convention as
+    # vapid_private_key above.
+    github_token: str = ""
+    github_repo_url: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

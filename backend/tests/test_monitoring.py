@@ -123,6 +123,28 @@ def test_cancel_monitored_trip_nonexistent_id_returns_false(conn):
     assert result is False
 
 
+def test_cancel_monitored_trip_queues_a_feedback_request(conn):
+    # Feedback Triage Agent (2026-11-06): a successful cancel is the
+    # "arrived at destination" trip-ended case that should prompt for
+    # feedback -- see app/feedback.py.
+    trip_id = create_monitored_trip(_itinerary(), "anon-1", None, conn=conn)
+
+    cancel_monitored_trip(trip_id, "anon-1", conn=conn)
+
+    row = conn.execute("SELECT * FROM feedback WHERE trip_id = ?", (trip_id,)).fetchone()
+    assert row is not None
+    assert row["anonymous_id"] == "anon-1"
+
+
+def test_failed_cancel_does_not_queue_a_feedback_request(conn):
+    trip_id = create_monitored_trip(_itinerary(), "anon-1", None, conn=conn)
+
+    cancel_monitored_trip(trip_id, "anon-2", conn=conn)  # wrong owner -- fails
+
+    row = conn.execute("SELECT * FROM feedback WHERE trip_id = ?", (trip_id,)).fetchone()
+    assert row is None
+
+
 # --- list_active_trips --------------------------------------------------------
 
 

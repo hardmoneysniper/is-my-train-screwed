@@ -14,6 +14,7 @@ dependencies = [
     "anthropic>=0.40",
     "gtfs-realtime-bindings>=1.0",
     "tzdata>=2024.1",
+    "pywebpush>=2.0",
 ]
 
 [project.optional-dependencies]

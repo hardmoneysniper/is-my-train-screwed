@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.trip import router as trip_router
 from app.api.chat import router as chat_router
+from app.api.push import router as push_router
 from app.otp_lifecycle import stop_otp_if_idle
 from app.realtime_proxy import app as realtime_proxy_app, lifespan as realtime_proxy_lifespan
 from app.trip_monitor import run_monitor_cycle
@@ -189,6 +190,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Is My Train Screwed?", lifespan=lifespan)
 app.include_router(trip_router)
 app.include_router(chat_router)
+app.include_router(push_router)
 # Mounts the subway GTFS-RT trip-id rewriting proxy (Phase 1 Task 11) at
 # /proxy so one Railway service can serve both /chat and /proxy/rt/... --
 # avoiding a 4th service that would also need its own copy of subway.zip
