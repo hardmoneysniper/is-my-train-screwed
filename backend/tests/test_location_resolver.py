@@ -18,8 +18,8 @@ def _text_response(text: str):
 @pytest.mark.asyncio
 async def test_returns_the_rewritten_string_on_success():
     response = _text_response("Hudson Yards, Manhattan, New York, NY")
-    with patch("app.location_resolver.AsyncAnthropic") as mock_cls, \
-         patch("app.location_resolver.cost_guard.log_call") as mock_log:
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls, \
+         patch("app.anthropic_text.cost_guard.log_call") as mock_log:
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await resolve_location_description("hudson yards")
 
@@ -30,7 +30,7 @@ async def test_returns_the_rewritten_string_on_success():
 
 @pytest.mark.asyncio
 async def test_falls_back_to_original_query_on_api_error():
-    with patch("app.location_resolver.AsyncAnthropic") as mock_cls:
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls:
         mock_cls.return_value.messages.create = AsyncMock(
             side_effect=APIConnectionError(request=MagicMock())
         )
@@ -42,8 +42,8 @@ async def test_falls_back_to_original_query_on_api_error():
 @pytest.mark.asyncio
 async def test_falls_back_to_original_query_on_empty_response_text():
     response = _text_response("   ")
-    with patch("app.location_resolver.AsyncAnthropic") as mock_cls, \
-         patch("app.location_resolver.cost_guard.log_call"):
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls, \
+         patch("app.anthropic_text.cost_guard.log_call"):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await resolve_location_description("some place")
 
@@ -53,8 +53,8 @@ async def test_falls_back_to_original_query_on_empty_response_text():
 @pytest.mark.asyncio
 async def test_cost_cap_exceeded_propagates_instead_of_falling_back():
     response = _text_response("Hudson Yards, Manhattan, New York, NY")
-    with patch("app.location_resolver.AsyncAnthropic") as mock_cls, \
-         patch("app.location_resolver.cost_guard.log_call", side_effect=CostCapExceeded("over cap")):
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls, \
+         patch("app.anthropic_text.cost_guard.log_call", side_effect=CostCapExceeded("over cap")):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         with pytest.raises(CostCapExceeded):
             await resolve_location_description("hudson yards")

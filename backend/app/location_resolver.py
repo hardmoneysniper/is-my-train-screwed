@@ -32,9 +32,9 @@ would be worse than passing the user's original wording through
 unchanged, since it could steer the geocoder toward a different wrong
 match without the user having any reason to doubt it.
 """
-from anthropic import AnthropicError, AsyncAnthropic
+from anthropic import AnthropicError
 
-import cost_guard
+from app.anthropic_text import call_and_log, extract_text
 from app.config import settings
 
 SYSTEM_PROMPT = (
@@ -64,20 +64,13 @@ async def resolve_location_description(query: str) -> str:
     breach must still halt further calls, same as every other Anthropic
     call site in this product (cost_guard.log_call's own docstring)."""
     try:
-        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        response = await client.messages.create(
-            model=settings.location_resolver_model,
-            max_tokens=100,
-            system=SYSTEM_PROMPT,
+        response = await call_and_log(
+            settings.location_resolver_model, max_tokens=100,
             messages=[{"role": "user", "content": query}],
-        )
-        cost_guard.log_call(
-            response.usage.model_dump(), agent="location_resolver", model=settings.location_resolver_model
+            agent="location_resolver", system=SYSTEM_PROMPT,
         )
     except AnthropicError:
         return query
 
-    text_block = next((b for b in response.content if b.type == "text"), None)
-    if text_block is None or not text_block.text.strip():
-        return query
-    return text_block.text.strip()
+    text = extract_text(response).strip()
+    return text if text else query

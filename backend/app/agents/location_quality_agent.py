@@ -22,11 +22,9 @@ wrong, find_place's caller sees an honest empty list -- the same
 "couldn't find that place" path it already takes for a genuine zero-
 result search -- rather than a plausible-but-fabricated fix.
 """
-import json
+from anthropic import AnthropicError
 
-from anthropic import AnthropicError, AsyncAnthropic
-
-import cost_guard
+from app.anthropic_text import call_and_log, extract_json_object, extract_text
 from app.config import settings
 
 SYSTEM_PROMPT = (
@@ -51,16 +49,6 @@ def _build_prompt(original_query: str, candidates: list[dict]) -> str:
     return f"Rider's description: {original_query}\n\nCandidates:\n{listed}"
 
 
-def _parse_json_object(text: str) -> dict:
-    """Asked for JSON-only output, but a model occasionally wraps it in
-    prose or a markdown fence anyway -- extract the first {...} block
-    rather than assuming the response text is bare JSON."""
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"no JSON object found in model output: {text!r}")
-    return json.loads(text[start:end + 1])
-
-
 async def check_location_matches(original_query: str, candidates: list[dict]) -> list[dict]:
     """Returns the subset of `candidates` judged to genuinely match
     `original_query`, in their original relative order -- possibly empty
@@ -71,18 +59,12 @@ async def check_location_matches(original_query: str, candidates: list[dict]) ->
     enhancement on top of find_place, never a hard dependency for it to
     keep working."""
     try:
-        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        response = await client.messages.create(
-            model=settings.location_quality_model,
-            max_tokens=200,
-            system=SYSTEM_PROMPT,
+        response = await call_and_log(
+            settings.location_quality_model, max_tokens=200,
             messages=[{"role": "user", "content": _build_prompt(original_query, candidates)}],
+            agent="location_quality_agent", system=SYSTEM_PROMPT,
         )
-        cost_guard.log_call(
-            response.usage.model_dump(), agent="location_quality_agent", model=settings.location_quality_model,
-        )
-        text_block = next((b for b in response.content if b.type == "text"), None)
-        result = _parse_json_object(text_block.text if text_block is not None else "")
+        result = extract_json_object(extract_text(response))
         keep_indices = result.get("keep_indices")
         if not isinstance(keep_indices, list):
             return candidates

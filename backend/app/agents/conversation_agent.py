@@ -17,6 +17,7 @@ from app.agents.tools import (
     PLAN_ROUTE_TOOL,
 )
 from app.agents.feedback_triage_agent import triage_feedback
+from app.anthropic_text import extract_text
 from app.find_place import find_place
 from app.location_resolver import resolve_location_description
 from app.geocode import geocode_address
@@ -422,8 +423,7 @@ class ConversationAgent:
             ]
             response = await self._create(messages)
 
-        text_block = next((b for b in response.content if b.type == "text"), None)
-        reply_text = text_block.text if text_block is not None else ""
+        reply_text = extract_text(response)
 
         # Claim happens LAST, only once the reply is guaranteed to be
         # returned -- never at the top of respond(), before the LLM turn(s).

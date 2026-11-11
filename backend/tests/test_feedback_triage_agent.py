@@ -79,8 +79,8 @@ def _fetch(conn, feedback_id):
 async def test_rejected_feedback_is_marked_and_not_categorized(conn):
     feedback_id = _insert_feedback(conn, raw_text="what time is the next F train")
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=_quality_response(False))
         await triage_feedback(feedback_id, conn=conn)
@@ -100,7 +100,7 @@ async def test_noop_when_feedback_row_has_no_raw_text(conn):
     conn.commit()
     feedback_id = cursor.lastrowid
 
-    with patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls:
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls:
         await triage_feedback(feedback_id, conn=conn)
 
     mock_cls.return_value.messages.create.assert_not_called()
@@ -109,7 +109,7 @@ async def test_noop_when_feedback_row_has_no_raw_text(conn):
 
 @pytest.mark.asyncio
 async def test_noop_for_a_nonexistent_feedback_id(conn):
-    with patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls:
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls:
         await triage_feedback(999999, conn=conn)  # must not raise
 
     mock_cls.return_value.messages.create.assert_not_called()
@@ -119,8 +119,8 @@ async def test_noop_for_a_nonexistent_feedback_id(conn):
 async def test_malformed_model_response_raises_for_the_caller_to_handle(conn):
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=_text_response("not json"))
         with pytest.raises(ValueError):
@@ -134,8 +134,8 @@ async def test_malformed_model_response_raises_for_the_caller_to_handle(conn):
 async def test_genuine_feedback_is_categorized_and_summarized(conn):
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -157,8 +157,8 @@ async def test_duplicate_of_is_recorded_when_the_model_flags_a_real_recent_id(co
     feedback_id = _insert_feedback(conn, raw_text="same thing, the bus delay wasn't flagged", trip_id=2)
 
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -181,8 +181,8 @@ async def test_hallucinated_duplicate_of_id_is_rejected_not_stored(conn):
     feedback_id = _insert_feedback(conn, trip_id=2)
 
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -197,8 +197,8 @@ async def test_hallucinated_duplicate_of_id_is_rejected_not_stored(conn):
 async def test_non_integer_duplicate_of_is_rejected_not_stored(conn):
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -216,8 +216,8 @@ async def test_non_string_category_falls_back_to_other_without_crashing(conn):
     # validation cleanly, not raise TypeError.
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -232,8 +232,8 @@ async def test_non_string_category_falls_back_to_other_without_crashing(conn):
 async def test_unrecognized_category_falls_back_to_other(conn):
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -248,8 +248,8 @@ async def test_unrecognized_category_falls_back_to_other(conn):
 async def test_missing_summary_falls_back_to_raw_text(conn):
     feedback_id = _insert_feedback(conn, raw_text="the raw complaint text")
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[
             _quality_response(True),
@@ -267,8 +267,8 @@ async def test_missing_summary_falls_back_to_raw_text(conn):
 async def test_genuine_non_duplicate_opens_a_new_github_issue(conn):
     feedback_id = _insert_feedback(conn, raw_text="the bus was late")
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock, return_value=42) as mock_create,
         patch("app.agents.feedback_triage_agent.comment_on_issue", new_callable=AsyncMock) as mock_comment,
     ):
@@ -291,8 +291,8 @@ async def test_genuine_non_duplicate_opens_a_new_github_issue(conn):
 async def test_rejected_feedback_never_touches_github(conn):
     feedback_id = _insert_feedback(conn, raw_text="what time is it")
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock) as mock_create,
         patch("app.agents.feedback_triage_agent.comment_on_issue", new_callable=AsyncMock) as mock_comment,
     ):
@@ -310,8 +310,8 @@ async def test_duplicate_with_a_github_issue_comments_instead_of_opening_a_new_o
     feedback_id = _insert_feedback(conn, raw_text="same bus delay issue, still not flagged", trip_id=2)
 
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock) as mock_create,
         patch("app.agents.feedback_triage_agent.comment_on_issue", new_callable=AsyncMock, return_value=True) as mock_comment,
     ):
@@ -339,8 +339,8 @@ async def test_duplicate_whose_original_has_no_github_issue_opens_a_new_issue_in
     feedback_id = _insert_feedback(conn, raw_text="same bus delay issue again", trip_id=2)
 
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock, return_value=99) as mock_create,
         patch("app.agents.feedback_triage_agent.comment_on_issue", new_callable=AsyncMock) as mock_comment,
     ):
@@ -365,8 +365,8 @@ async def test_duplicate_whose_comment_fails_falls_back_to_opening_a_new_issue(c
     feedback_id = _insert_feedback(conn, raw_text="same bus delay issue, still not flagged", trip_id=2)
 
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock, return_value=101) as mock_create,
         patch("app.agents.feedback_triage_agent.comment_on_issue", new_callable=AsyncMock, return_value=False) as mock_comment,
     ):
@@ -385,8 +385,8 @@ async def test_duplicate_whose_comment_fails_falls_back_to_opening_a_new_issue(c
 async def test_github_create_issue_failure_leaves_issue_number_null_without_raising(conn):
     feedback_id = _insert_feedback(conn)
     with (
-        patch("app.agents.feedback_triage_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.feedback_triage_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
         patch("app.agents.feedback_triage_agent.create_issue", new_callable=AsyncMock, return_value=None),
     ):
         mock_cls.return_value.messages.create = AsyncMock(side_effect=[

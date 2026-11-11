@@ -31,6 +31,7 @@ import gzip
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 from datetime import date
@@ -38,9 +39,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app import bus_schedule_periods  # noqa: E402
+from app import bus_schedule_periods, risk_engine  # noqa: E402
 from app.day_type import day_type_for  # noqa: E402
-from app.risk_engine import LATE_NIGHT_SUPPRESSED_HOURS, MIN_N_OBSERVATIONS  # noqa: E402
+from app.risk_engine import LATE_NIGHT_SUPPRESSED_HOURS  # noqa: E402
 from collectors.bus_collector import CORRIDORS  # noqa: E402
 from db import get_connection  # noqa: E402
 from scripts.aggregate_reliability_buckets import run_aggregate  # noqa: E402
@@ -99,8 +100,11 @@ REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
 # derive+aggregate pipeline (same one run_local_pipeline.py uses) against
 # freshly-synced raw data every hour -- "categorizing" it, not just
 # collecting it -- then measures the REAL fraction of each corridor's
-# real (ever-observed) buckets that clear MIN_N_OBSERVATIONS directly
-# from reliability_buckets. No more predicting; just measuring.
+# real (ever-observed) buckets that are actually citable in production
+# (risk_engine.py's real Wilson/mean-CI gate, see _is_citable_row --
+# 2026-11-11, replacing an earlier flat-n>=50 version of this same
+# measurement) directly from reliability_buckets. No more predicting;
+# just measuring.
 #
 # BUS_COLLECTION_TARGETS is kept only as a cheap, zero-GTFS-parsing raw
 # progress indicator for status-check logging (how much raw collection
@@ -201,10 +205,11 @@ def local_route_day_type_counts() -> dict[str, dict[str, int]]:
 
 
 # 2026-10-12 (user): a corridor/day_type is "ready to stop" once this
-# fraction of its real (ever-observed, n_observations > 0) buckets clear
-# MIN_N_OBSERVATIONS -- not 100%: some scheduled slots may see so little
-# real traffic that chasing every last one isn't worth the wait (the
-# same lesson as the retired raw-record-target attempts), and a bucket
+# fraction of its real (ever-observed, n_observations > 0) buckets are
+# actually citable (_is_citable_row) -- not 100%: some scheduled slots
+# may see so little real traffic that chasing every last one isn't
+# worth the wait (the same lesson as the retired raw-record-target
+# attempts), and a bucket
 # that's NEVER been observed even once gives no evidence either way, so
 # it's excluded from the denominator rather than counted as "not ready".
 COVERAGE_COMPLETION_FRACTION = 0.90
@@ -254,12 +259,61 @@ def _late_night_period_keys(route: str) -> set[tuple[str, int]]:
     }
 
 
+def _is_citable_row(stat_type: str, histogram_json: str) -> bool:
+    """Whether a single reliability_buckets row would actually support a
+    citation in production, per risk_engine.py's real Wilson-CI/mean-CI
+    gates -- NOT the old flat `n_observations >= MIN_N_OBSERVATIONS`
+    floor, which stopped being how this product decides citability on
+    2026-10-15 (see risk_engine.py's own MIN_N_OBSERVATIONS comment) but
+    which this file's coverage trackers kept checking anyway until now, a
+    real staleness bug found 2026-11-11: measured live, it understated
+    real combined coverage by ~24 points on average across every active
+    corridor (57.6% vs. the real 81.3%) -- a bucket's raw count says
+    nothing about whether its distribution is tight enough to cite; a
+    small, confidently-extreme sample can already clear the real gate
+    while a much larger, genuinely 50/50 one still can't (same reasoning
+    that justified lowering MIN_N_OBSERVATIONS itself on 2026-10-12, just
+    applied per-bucket via a real CI instead of a flat number).
+
+    A 'headway' row is this product's OUTGOING/wait-time bucket type
+    (citable_typical_wait_seconds); every other tracked stat_type
+    ('prediction_error' for bus, this file's only agency) is an
+    INCOMING/miss bucket (citable_p_miss). citable_p_miss needs a real
+    buffer_seconds, which only exists at actual query time -- 0.0 here is
+    a representative stand-in ("did the incoming vehicle run late at
+    all"), not a per-query guarantee; this function is a progress-
+    tracking proxy, same scope its n>=50 predecessor had, not a claim
+    that every real transfer at every real buffer is citable."""
+    histogram = json.loads(histogram_json)
+    if stat_type == "headway":
+        return risk_engine.citable_typical_wait_seconds(histogram) is not None
+    return risk_engine.citable_p_miss(histogram, buffer_seconds=0.0) is not None
+
+
+def _real_coverage_rows(conn, route: str, day_type: str, excluded_keys: set) -> list[sqlite3.Row]:
+    """Shared query real_bucket_coverage/real_volume_coverage both need --
+    every real (ever-observed) bus bucket for one (route, day_type),
+    minus the late-night ones production never cites (see
+    _late_night_period_keys)."""
+    rows = conn.execute(
+        """
+        SELECT hour_bucket, stat_type, histogram, n_observations FROM reliability_buckets
+        WHERE agency = 'bus' AND route_id = ? AND day_type = ?
+          AND stat_type IN ('headway', 'prediction_error')
+          AND n_observations > 0
+        """,
+        (route, day_type),
+    ).fetchall()
+    return [r for r in rows if (day_type, r["hour_bucket"]) not in excluded_keys]
+
+
 def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
     """{route: {day_type: (buckets_cleared, real_buckets_total)}} measured
     directly from local_pipeline.sqlite3's reliability_buckets -- the
     actual thing that matters (can get_risk cite from this bucket), not a
-    raw-record proxy for it. Call categorize_bus_data() first so this
-    reflects the latest synced data.
+    raw-record proxy for it, and (2026-11-11) not the stale n>=50 proxy
+    either -- see _is_citable_row's docstring. Call categorize_bus_data()
+    first so this reflects the latest synced data.
 
     Excludes real late-night buckets (2026-10-12, user: "almost nobody
     rides a bus at 2am thus almost nobody is using our service" for it,
@@ -277,19 +331,9 @@ def real_bucket_coverage() -> dict[str, dict[str, tuple[int, int]]]:
             excluded_keys = _late_night_period_keys(route)
             coverage[route] = {}
             for day_type in ("weekday", "weekend"):
-                rows = conn.execute(
-                    """
-                    SELECT hour_bucket, n_observations FROM reliability_buckets
-                    WHERE agency = 'bus' AND route_id = ? AND day_type = ?
-                      AND stat_type IN ('headway', 'prediction_error')
-                      AND n_observations > 0
-                    """,
-                    (route, day_type),
-                ).fetchall()
-                kept = [r[1] for r in rows if (day_type, r[0]) not in excluded_keys]
-                total = len(kept)
-                cleared = sum(1 for n in kept if n >= MIN_N_OBSERVATIONS)
-                coverage[route][day_type] = (cleared, total)
+                kept = _real_coverage_rows(conn, route, day_type, excluded_keys)
+                cleared = sum(1 for r in kept if _is_citable_row(r["stat_type"], r["histogram"]))
+                coverage[route][day_type] = (cleared, len(kept))
         return coverage
     finally:
         conn.close()
@@ -318,7 +362,9 @@ def real_volume_coverage() -> dict[str, dict[str, tuple[float, float]]]:
     coverage_complete()'s stop decision -- that stays bucket-count based
     (the established, conservative policy) -- this is additional
     reporting only. Excludes real late-night buckets the same way
-    real_bucket_coverage() does (see _late_night_period_keys)."""
+    real_bucket_coverage() does (see _late_night_period_keys), and
+    (2026-11-11) uses the same real citability gate -- see
+    _is_citable_row's docstring."""
     conn = get_connection(str(LOCAL_PIPELINE_DB_PATH))
     try:
         coverage: dict[str, dict[str, tuple[float, float]]] = {}
@@ -326,18 +372,9 @@ def real_volume_coverage() -> dict[str, dict[str, tuple[float, float]]]:
             excluded_keys = _late_night_period_keys(route)
             coverage[route] = {}
             for day_type in ("weekday", "weekend"):
-                rows = conn.execute(
-                    """
-                    SELECT hour_bucket, n_observations FROM reliability_buckets
-                    WHERE agency = 'bus' AND route_id = ? AND day_type = ?
-                      AND stat_type IN ('headway', 'prediction_error')
-                      AND n_observations > 0
-                    """,
-                    (route, day_type),
-                ).fetchall()
-                kept = [r[1] for r in rows if (day_type, r[0]) not in excluded_keys]
-                total_n = sum(kept)
-                citable_n = sum(n for n in kept if n >= MIN_N_OBSERVATIONS)
+                kept = _real_coverage_rows(conn, route, day_type, excluded_keys)
+                total_n = sum(r["n_observations"] for r in kept)
+                citable_n = sum(r["n_observations"] for r in kept if _is_citable_row(r["stat_type"], r["histogram"]))
                 coverage[route][day_type] = (citable_n, total_n)
         return coverage
     finally:
@@ -428,7 +465,7 @@ if __name__ == "__main__":
         for day_type in ("weekday", "weekend"):
             cleared, total = coverage.get(route, {}).get(day_type, (0, 0))
             pct = (cleared / total * 100) if total else 0.0
-            print(f"[hourly-bus-sync] coverage {route} {day_type}: {cleared}/{total} buckets >= n={MIN_N_OBSERVATIONS} ({pct:.0f}%)", flush=True)
+            print(f"[hourly-bus-sync] coverage {route} {day_type}: {cleared}/{total} real-citable buckets ({pct:.0f}%)", flush=True)
 
     # Second lens (2026-10-20): same real data, weighted by observation
     # volume instead of distinct-bucket count -- see real_volume_coverage()

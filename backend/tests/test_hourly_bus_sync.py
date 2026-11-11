@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from db import get_connection
 from scripts.hourly_bus_sync import (
+    _is_citable_row,
     check_and_maybe_stop_collection,
     coverage_complete,
     local_route_day_type_counts,
@@ -22,7 +23,38 @@ from scripts.hourly_bus_sync import (
 )
 
 
-def _insert_bucket(conn, route_id, day_type, n_observations, stop_id="12345", hour_bucket=8, stat_type="headway"):
+def _citable_histogram(n_observations: int) -> str:
+    """A single-bin histogram -- all `n_observations` weight at one
+    midpoint, so variance (and therefore both the Wilson and mean-CI
+    half-widths) is exactly 0, which always clears the real gate
+    regardless of n (see risk_engine.py's citable_p_miss/
+    citable_typical_wait_seconds): a perfectly concentrated distribution
+    needs no minimum sample size to describe confidently. Deliberately
+    the DEFAULT shape for these fixtures -- most of this file's existing
+    cases only care about "is there a real bucket here", not about
+    exercising the CI math itself (that's test_risk_engine.py's job),
+    and real_bucket_coverage()/real_volume_coverage() (2026-11-11) no
+    longer have a notion of "high n" being citable on its own, so a
+    fixture that's citable regardless of n is the honest default."""
+    return json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [n_observations]})
+
+
+def _uncited_headway_histogram(n_observations: int) -> str:
+    """A deliberately wide, bimodal headway histogram -- half the weight
+    at one extreme, half at another ~3000s away -- for fixtures that
+    must stay uncleared under the real mean-CI gate regardless of n.
+    Used only where a test's whole point is "this bucket must NOT
+    clear" (see _citable_histogram's docstring for the default/citable
+    case every other fixture uses)."""
+    half = n_observations // 2
+    counts = [half] + [0] * 99 + [n_observations - half]
+    return json.dumps({"bin_width_s": 30, "min_s": 0, "counts": counts})
+
+
+def _insert_bucket(conn, route_id, day_type, n_observations, stop_id="12345", hour_bucket=8,
+                    stat_type="headway", histogram=None):
+    if histogram is None:
+        histogram = _citable_histogram(n_observations)
     conn.execute(
         """
         INSERT INTO reliability_buckets (
@@ -30,11 +62,11 @@ def _insert_bucket(conn, route_id, day_type, n_observations, stop_id="12345", ho
             stat_type, histogram, n_observations, n_ambiguous, window_start,
             last_updated
         ) VALUES (
-            'bus', ?, ?, 'N', ?, ?, ?, '{"bin_width_s":30,"min_s":0,"counts":[]}',
+            'bus', ?, ?, 'N', ?, ?, ?, ?,
             ?, 0, '2026-08-14', '2026-10-12T00:00:00+00:00'
         )
         """,
-        (route_id, stop_id, day_type, hour_bucket, stat_type, n_observations),
+        (route_id, stop_id, day_type, hour_bucket, stat_type, histogram, n_observations),
     )
     conn.commit()
 
@@ -98,13 +130,50 @@ def test_local_route_day_type_counts_splits_weekday_and_weekend(tmp_path):
     assert counts["Q102"] == {"weekday": 0, "weekend": 1}
 
 
+def test_is_citable_row_clears_a_low_n_but_confidently_concentrated_bucket():
+    # The actual point of the 2026-11-11 fix: a small sample that's
+    # tightly concentrated is citable even though it would NEVER have
+    # cleared the old flat n>=50 proxy. n=12 is the same value
+    # test_wilson_half_width_narrows_for_extreme_p_even_at_low_n already
+    # pins at the lower level (12/12 clears P_MISS_CI_HALF_WIDTH_MAX);
+    # a single-bin histogram's p_miss is always 1.0 (all-or-nothing
+    # concentration), so this exercises the exact same real math through
+    # the higher-level function this fix actually changed.
+    assert _is_citable_row("headway", _citable_histogram(12)) is True
+    assert _is_citable_row("prediction_error", _citable_histogram(12)) is True
+
+
+def test_is_citable_row_depends_on_the_real_distribution_shape_not_just_raw_count():
+    # The actual, correctly-behaved flip side: citability now depends on
+    # the histogram's real shape, not a flat count -- at the SAME n (50,
+    # the old flat threshold's own value), a concentrated bucket clears
+    # the real gate while a genuinely wide/uncertain one at that
+    # identical n does not. (A "does high n alone ever fail" framing
+    # isn't the right test for a well-behaved CI gate: given enough real
+    # samples confirming the SAME wide pattern, the mean's own estimate
+    # legitimately tightens too -- see _uncited_headway_histogram(200)
+    # in the volume-coverage test above, which correctly DOES clear.)
+    assert _is_citable_row("headway", _citable_histogram(50)) is True
+    assert _is_citable_row("headway", _uncited_headway_histogram(50)) is False
+
+
+def test_is_citable_row_rejects_an_all_zero_histogram():
+    empty = json.dumps({"bin_width_s": 30, "min_s": 0, "counts": [0, 0, 0]})
+    assert _is_citable_row("headway", empty) is False
+    assert _is_citable_row("prediction_error", empty) is False
+
+
 def test_real_bucket_coverage_measures_directly_against_reliability_buckets(tmp_path):
     db_path = tmp_path / "local_pipeline.sqlite3"
     conn = get_connection(str(db_path))
     try:
-        # M60+ weekday: 2 real buckets, 1 clears MIN_N_OBSERVATIONS (50).
+        # M60+ weekday: 2 real buckets, 1 clears the real citability gate
+        # (a concentrated/citable histogram by default -- see
+        # _citable_histogram) and 1 that deliberately doesn't (a wide,
+        # uncertain spread -- see _uncited_headway_histogram).
         _insert_bucket(conn, "M60+", "weekday", n_observations=80, stop_id="s1")
-        _insert_bucket(conn, "M60+", "weekday", n_observations=10, stop_id="s2")
+        _insert_bucket(conn, "M60+", "weekday", n_observations=10, stop_id="s2",
+                        histogram=_uncited_headway_histogram(10))
         # M60+ weekend: zero real buckets at all.
         # Q70+ weekday: only a prediction_error bucket (still counted --
         # both stat_types are real candidate buckets).
@@ -201,12 +270,14 @@ def test_real_volume_coverage_weights_by_observation_count_not_bucket_count(tmp_
     conn = get_connection(str(db_path))
     try:
         # One already-citable bucket carries almost all real traffic;
-        # four more real buckets exist but are each thin and uncleared.
+        # four more real buckets exist but are each thin AND genuinely
+        # uncertain (a wide spread -- see _uncited_headway_histogram),
+        # so they stay uncleared under the real gate too.
         _insert_bucket(conn, "Q102", "weekday", n_observations=400, stop_id="s1")
-        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s2")
-        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s3")
-        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s4")
-        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s5")
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s2", histogram=_uncited_headway_histogram(5))
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s3", histogram=_uncited_headway_histogram(5))
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s4", histogram=_uncited_headway_histogram(5))
+        _insert_bucket(conn, "Q102", "weekday", n_observations=5, stop_id="s5", histogram=_uncited_headway_histogram(5))
     finally:
         conn.close()
 

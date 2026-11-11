@@ -24,8 +24,8 @@ def _text_response(text: str):
 async def test_drops_a_candidate_the_model_judges_a_clear_mismatch():
     response = _text_response(json.dumps({"keep_indices": [1]}))
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("the zara on 21st st manhattan", CANDIDATES)
@@ -37,8 +37,8 @@ async def test_drops_a_candidate_the_model_judges_a_clear_mismatch():
 async def test_returns_empty_list_when_model_judges_nothing_plausible():
     response = _text_response(json.dumps({"keep_indices": []}))
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("a place that doesn't exist", CANDIDATES)
@@ -50,8 +50,8 @@ async def test_returns_empty_list_when_model_judges_nothing_plausible():
 async def test_keeps_all_candidates_when_model_judges_all_plausible():
     response = _text_response(json.dumps({"keep_indices": [0, 1]}))
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("zara manhattan", CANDIDATES)
@@ -61,7 +61,7 @@ async def test_keeps_all_candidates_when_model_judges_all_plausible():
 
 @pytest.mark.asyncio
 async def test_fails_open_to_unfiltered_candidates_on_api_error():
-    with patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls:
+    with patch("app.anthropic_text.AsyncAnthropic") as mock_cls:
         mock_cls.return_value.messages.create = AsyncMock(
             side_effect=APIConnectionError(request=MagicMock())
         )
@@ -74,8 +74,8 @@ async def test_fails_open_to_unfiltered_candidates_on_api_error():
 async def test_fails_open_to_unfiltered_candidates_on_malformed_model_response():
     response = _text_response("not json at all")
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("zara manhattan", CANDIDATES)
@@ -87,8 +87,8 @@ async def test_fails_open_to_unfiltered_candidates_on_malformed_model_response()
 async def test_fails_open_when_keep_indices_is_not_a_list():
     response = _text_response(json.dumps({"keep_indices": "oops"}))
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("zara manhattan", CANDIDATES)
@@ -100,8 +100,8 @@ async def test_fails_open_when_keep_indices_is_not_a_list():
 async def test_ignores_out_of_range_or_non_integer_indices():
     response = _text_response(json.dumps({"keep_indices": [1, 99, "x"]}))
     with (
-        patch("app.agents.location_quality_agent.AsyncAnthropic") as mock_cls,
-        patch("app.agents.location_quality_agent.cost_guard.log_call"),
+        patch("app.anthropic_text.AsyncAnthropic") as mock_cls,
+        patch("app.anthropic_text.cost_guard.log_call"),
     ):
         mock_cls.return_value.messages.create = AsyncMock(return_value=response)
         result = await check_location_matches("zara manhattan", CANDIDATES)

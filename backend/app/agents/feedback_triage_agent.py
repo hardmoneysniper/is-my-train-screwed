@@ -39,13 +39,10 @@ see `app/agents/conversation_agent.py`):
    status/category/summary/duplicate_of) from being saved; it only means
    github_issue_number stays NULL.
 """
-import json
 import sqlite3
 from datetime import datetime, timezone
 
-from anthropic import AsyncAnthropic
-
-import cost_guard
+from app.anthropic_text import call_and_log, extract_json_object, extract_text
 from app.config import settings
 from app.github_issues import comment_on_issue, create_issue
 from db import get_connection
@@ -79,16 +76,6 @@ VALID_CATEGORIES = frozenset({"bug", "feature_request", "data_quality", "ux", "p
 DEFAULT_CATEGORY = "other"
 
 
-def _parse_json_object(text: str) -> dict:
-    """Both prompts ask for JSON-only output, but a model occasionally
-    wraps it in prose or a markdown fence anyway -- extract the first
-    {...} block rather than assuming the response text is bare JSON."""
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"no JSON object found in model output: {text!r}")
-    return json.loads(text[start:end + 1])
-
-
 def _validate_category(raw_value) -> str:
     """Never trusts the model's category string blind -- an unrecognized
     value (a typo, a category it invented, None) would otherwise both
@@ -116,13 +103,11 @@ def _validate_duplicate_of(raw_value, candidate_ids: set[int]) -> int | None:
     return value if value in candidate_ids else None
 
 
-async def _call(client: AsyncAnthropic, model: str, prompt: str) -> dict:
-    response = await client.messages.create(
-        model=model, max_tokens=256, messages=[{"role": "user", "content": prompt}],
+async def _call(model: str, prompt: str) -> dict:
+    response = await call_and_log(
+        model, max_tokens=256, messages=[{"role": "user", "content": prompt}], agent="feedback_triage_agent",
     )
-    cost_guard.log_call(response.usage.model_dump(), agent="feedback_triage_agent", model=model)
-    text_block = next((b for b in response.content if b.type == "text"), None)
-    return _parse_json_object(text_block.text if text_block is not None else "")
+    return extract_json_object(extract_text(response))
 
 
 def _issue_body(raw_text: str, feedback_id: int) -> str:
@@ -176,13 +161,9 @@ async def triage_feedback(feedback_id: int, conn: sqlite3.Connection | None = No
         if row is None or not row["raw_text"]:
             return
 
-        client = AsyncAnthropic(api_key=settings.anthropic_api_key)
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        quality = await _call(
-            client, settings.feedback_quality_model,
-            QUALITY_CHECK_PROMPT.format(text=row["raw_text"]),
-        )
+        quality = await _call(settings.feedback_quality_model, QUALITY_CHECK_PROMPT.format(text=row["raw_text"]))
         if not quality.get("is_feedback"):
             conn.execute(
                 "UPDATE feedback SET quality_status = 'rejected', triaged_at = ? WHERE id = ?",
@@ -203,8 +184,7 @@ async def triage_feedback(feedback_id: int, conn: sqlite3.Connection | None = No
         candidate_ids = {r["id"] for r in recent_rows}
 
         triage = await _call(
-            client, settings.feedback_triage_model,
-            TRIAGE_PROMPT.format(text=row["raw_text"], recent=recent_text),
+            settings.feedback_triage_model, TRIAGE_PROMPT.format(text=row["raw_text"], recent=recent_text),
         )
         category = _validate_category(triage.get("category"))
         summary = triage.get("summary") or row["raw_text"]

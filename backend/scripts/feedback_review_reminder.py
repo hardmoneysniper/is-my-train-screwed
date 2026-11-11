@@ -15,7 +15,6 @@ Windows-only (ctypes.windll, os.startfile) -- consistent with every
 other locally-scheduled script in this project, all of which already
 assume this machine's OS.
 """
-import ctypes
 import os
 import sys
 from pathlib import Path
@@ -23,19 +22,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.feedback_report import run_report  # noqa: E402
-
-MB_OK = 0x0
-MB_ICONINFORMATION = 0x40
+from scripts.windows_notify import show_message_box  # noqa: E402
 
 
 def main() -> None:
     report_path = run_report()
     os.startfile(report_path)  # opens in whatever app .md is associated with
-    ctypes.windll.user32.MessageBoxW(
-        0,
-        f"Time for your 30-day feedback review.\n\n{report_path} has just been regenerated and opened.",
+    show_message_box(
         "Is My Train Screwed? -- Feedback Review",
-        MB_OK | MB_ICONINFORMATION,
+        f"Time for your 30-day feedback review.\n\n{report_path} has just been regenerated and opened.",
     )
 
 

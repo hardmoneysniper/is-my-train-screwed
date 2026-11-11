@@ -335,6 +335,44 @@ def _mean_ci_half_width(histogram: dict, mean: float, n: float, z: float = WILSO
     return z * se
 
 
+def citable_p_miss(incoming_histogram: dict, buffer_seconds: float) -> float | None:
+    """The single real definition of "is a miss percentage citable from
+    this incoming bucket" -- `_compute_transfer_risk` (the real per-query
+    path) and `scripts/hourly_bus_sync.py`'s `real_bucket_coverage`
+    progress tracker (2026-11-11 fix) both call this directly rather than
+    each re-implementing the Wilson-gate check, so there is exactly one
+    place this product's "what counts as citable" standard lives.
+    Returns the real p_miss (2026-10-12's definition: incoming_offset >
+    buffer_seconds, see _p_miss_from_incoming) if its Wilson CI is narrow
+    enough (P_MISS_CI_HALF_WIDTH_MAX), else `None` -- never a number
+    computed from an all-zero histogram."""
+    total_w = sum(incoming_histogram["counts"])
+    if total_w <= 0:
+        return None
+    candidate = _p_miss_from_incoming(incoming_histogram, buffer_seconds)
+    if _wilson_half_width(candidate * total_w, total_w) <= P_MISS_CI_HALF_WIDTH_MAX:
+        return candidate
+    return None
+
+
+def citable_typical_wait_seconds(outgoing_histogram: dict) -> float | None:
+    """The single real definition of "is a typical-wait figure citable
+    from this outgoing bucket" -- same sharing rationale as
+    citable_p_miss above. Returns the real typical wait (weighted mean of
+    the headway histogram) if its mean-CI is narrow enough relative to
+    its own size (WAIT_MEAN_CI_FRACTION_MAX), else `None`."""
+    total_w = sum(outgoing_histogram["counts"])
+    if total_w <= 0:
+        return None
+    candidate = _typical_wait_seconds(outgoing_histogram)
+    if candidate <= 0:
+        return None
+    half_width = _mean_ci_half_width(outgoing_histogram, candidate, total_w)
+    if half_width <= WAIT_MEAN_CI_FRACTION_MAX * candidate:
+        return candidate
+    return None
+
+
 def _incoming_stat_type(agency_i: str) -> str:
     """Which stat_type the incoming leg's bucket is fetched from -- this is
     the fix for a real cross-task gap (final whole-branch review, Critical
@@ -424,38 +462,18 @@ def _compute_transfer_risk(
     incoming_n = incoming["n_observations"] if incoming else 0.0
     n = incoming_n
     window_days = _window_days(incoming["window_start"]) if incoming else 0
-    p_miss: float | None = None
-    quality = "insufficient"
-    if incoming is not None:
-        incoming_histogram = json.loads(incoming["histogram"])
-        # Cheap insurance (final whole-branch review, Minor #2, still
-        # applies): an all-zero histogram is just as "no real signal" as
-        # a missing bucket, so degrade the same way rather than divide by
-        # zero in _p_miss_from_incoming.
-        total_w = sum(incoming_histogram["counts"])
-        if total_w > 0:
-            candidate = _p_miss_from_incoming(incoming_histogram, buffer_seconds)
-            # Wilson CI gate (see P_MISS_CI_HALF_WIDTH_MAX's docstring)
-            # replaces the old flat incoming_n >= MIN_N_OBSERVATIONS
-            # check -- citable once the interval is narrow enough,
-            # regardless of raw n.
-            if _wilson_half_width(candidate * total_w, total_w) <= P_MISS_CI_HALF_WIDTH_MAX:
-                p_miss = candidate
-                quality = "ok"
 
-    # 2026-10-15 (user): typical_wait_seconds' citation gate is the mean-CI
-    # analog of p_miss's Wilson gate above -- replaces the flat
-    # outgoing_n >= MIN_N_OBSERVATIONS floor with "is the mean's own
-    # confidence interval tight enough," regardless of raw n.
-    typical_wait_seconds: float | None = None
-    if outgoing is not None:
-        outgoing_histogram = json.loads(outgoing["histogram"])
-        outgoing_total_w = sum(outgoing_histogram["counts"])
-        if outgoing_total_w > 0:
-            candidate_wait = _typical_wait_seconds(outgoing_histogram)
-            half_width = _mean_ci_half_width(outgoing_histogram, candidate_wait, outgoing_total_w)
-            if candidate_wait > 0 and half_width <= WAIT_MEAN_CI_FRACTION_MAX * candidate_wait:
-                typical_wait_seconds = candidate_wait
+    # Both citations go through the one shared definition of "citable"
+    # (citable_p_miss/citable_typical_wait_seconds, above) -- the same
+    # functions scripts/hourly_bus_sync.py's progress tracker calls, so
+    # there's exactly one place this product's Wilson/mean-CI standard
+    # lives, not a second copy here that could drift from it.
+    p_miss = citable_p_miss(json.loads(incoming["histogram"]), buffer_seconds) if incoming is not None else None
+    quality = "ok" if p_miss is not None else "insufficient"
+
+    typical_wait_seconds = (
+        citable_typical_wait_seconds(json.loads(outgoing["histogram"])) if outgoing is not None else None
+    )
 
     return p_miss, n, window_days, quality, typical_wait_seconds
 
