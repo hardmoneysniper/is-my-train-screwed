@@ -227,7 +227,9 @@ SYSTEM_PROMPT = (
     "deadline signal. Only call create_monitored_trip after the user agrees.\n\n"
     "If the user gives a specific deadline (e.g. \"I need to be there by 6pm\",\n"
     "\"my flight boards at 9:15\"), convert it to that day's date (using the\n"
-    "[Current time: ...] marker on the message) and pass it as create_monitored_trip's\n"
+    "[Current time in New York: ...] marker on the message, already in the "
+    "rider's local time, never UTC or another timezone) and pass it as "
+    "create_monitored_trip's\n"
     "deadline_ts, in epoch milliseconds. If the deadline is unclear or you're not\n"
     "sure what date/time they mean, ask rather than guessing — never invent a\n"
     "deadline_ts from an ambiguous statement.\n\n"
@@ -447,8 +449,20 @@ class ConversationAgent:
         if not conversation_history:
             asyncio.create_task(ensure_otp_awake())
 
-        now_iso = datetime.now(timezone.utc).isoformat()
-        prefix = f"[Current time: {now_iso}]"
+        # Real bug (2026-11-16): this used to inject UTC and rely on the
+        # model to convert to the rider's local time before reasoning
+        # about a stated clock-time deadline ("by 5pm") -- live replay
+        # showed it just read the UTC hour as if it were already NYC
+        # local time (treating "9:02 PM" UTC as 9:02 PM local, 5 hours
+        # off), which could make a genuinely reachable near-future
+        # deadline look already-past or vice versa. Converting here, in
+        # code, removes that arithmetic from the model entirely rather
+        # than hoping a prompt instruction makes it do the subtraction
+        # correctly every time. Reuses risk_engine.LOCAL_TZ -- the same
+        # America/New_York constant every other local-time computation in
+        # this codebase already uses, not a second definition of it.
+        now_local = datetime.now(risk_engine.LOCAL_TZ)
+        prefix = f"[Current time in New York: {now_local.isoformat()}]"
         if user_location is not None:
             prefix += f"\n[User's current location: {user_location['lat']}, {user_location['lon']}]"
         messages = conversation_history + [
