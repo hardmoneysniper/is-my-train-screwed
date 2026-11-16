@@ -446,6 +446,13 @@ class ConversationAgent:
                     content = self._handle_cancel_monitored_trip(tool_use.input, anonymous_id)
                 else:
                     content = json.dumps({"error": f"unknown tool: {tool_use.name}"})
+                # Standing diagnostic (2026-11-16, user request, kept intentionally --
+                # not removed after the coordinate-invention bug it helped root-cause):
+                # every tool call this agent makes, visible in Railway's logs, so a
+                # future bad-route report can be traced the same way (see that
+                # investigation's commits) instead of guessed at. Content truncated --
+                # this is for spotting a wrong/missing call, not a full audit log.
+                logging.info(f"[tool-trace] {tool_use.name} input={tool_use.input} -> {content[:600]}")
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
