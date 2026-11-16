@@ -427,6 +427,9 @@ class ConversationAgent:
                     content = self._handle_cancel_monitored_trip(tool_use.input, anonymous_id)
                 else:
                     content = json.dumps({"error": f"unknown tool: {tool_use.name}"})
+                # TEMP DIAGNOSTIC (2026-11-16) -- tracing a real routing bug
+                # report; remove once root-caused.
+                logging.info(f"[tool-trace] {tool_use.name} input={tool_use.input} -> {content[:600]}")
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
