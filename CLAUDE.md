@@ -287,6 +287,18 @@ Every refactor required updating each affected test's mock-patch target (e.g. `a
 
 **Evaluated and deliberately NOT adopted** (checked so this doesn't get re-litigated later): swapping risk_engine.py's hand-rolled Wilson/mean-CI formulas for `statsmodels`/`scipy` equivalents -- both are large, mostly-compiled dependencies that would be added for one already-correct, already-tested ~10-line formula each; not a net simplification at this project's scale. `numpy` is already present transitively (via `shapely`/`pyproj`) but not a declared direct dependency -- rewriting risk_engine.py's tiny per-histogram loops (a few dozen bins, never a hot path) to use it would add a real dependency for no measurable efficiency gain. A GitHub REST client library (`PyGithub`) for `app/github_issues.py`'s 2 simple POST calls -- `httpx` is already a direct dependency used throughout this codebase; adding a second HTTP-adjacent library for less code than the raw calls themselves already are would be the overimplementation this pass was explicitly asked to avoid, not a simplification.
 
+## AirTrain JFK added as a fourth, routing-only mode (2026-11-16)
+
+Real static GTFS confirmed live from the Mobility Database's listed source (`s3://datatools-511ny/public/Airtrain_JFK.zip`, agency "JFK Airtrain" -- Port Authority, not MTA). Same scope precedent as ferry (routing only, no reliability collector, no real-time integration) -- fixed schedule, not worth empirical collection.
+
+**Two real feed problems found and fixed before use, both disclosed here rather than silently patched:**
+1. `calendar.txt`'s `end_date` was `2021-12-31` -- the real service is unchanged since, the feed was just never re-published. Extended to `2030-12-31`.
+2. **The bigger one**: AirTrain's real schedule is frequency-based (`frequencies.txt`, headway service) -- and OTP 2.7.0 (this project's pinned Dockerfile version) has a real, confirmed bug crashing itinerary construction on ANY frequency-based trip (`Exception while fetching data (/plan) : distanceMeters`, a NullPointerException) -- this is OTP issue #6580, fixed in 2.8.1. Upgrading OTP was rejected as the fix (too much blast radius across every existing route already tuned against 2.7.0's behavior) in favor of expanding the frequency-based schedule into explicit, individually-timed trips (a mechanical, lossless GTFS transformation -- 15 frequency rows -> 1,038 real timed trips) that avoids the buggy code path entirely. Verified live after the fix: a real Howard Beach -> Terminal 4 query returns a real `TRAM` leg, correct ~10-minute duration, matching the schedule exactly.
+
+**If this bites again on some other feed**: check whether it uses `frequencies.txt` before assuming it's a routing/data-resolution bug -- any frequency-based feed will hit this same OTP 2.7.0 crash, not just AirTrain's.
+
+Files touched: `app/gtfs_paths.py` (ALL_ZIP_NAMES), both copies of `build-config.json` (`otp_config/`, tracked; `data/otp/`, gitignored and the one docker-compose's volume mount actually uses for a local rebuild -- kept identical, the same established pattern as every other build-config change). `data/gtfs/airtrain.zip` and `data/otp/airtrain.zip` are gitignored binary data, never committed -- re-derive from the S3 source + the frequency-expansion transformation above if ever lost.
+
 ## Reminders for future sessions
 
 - Re-verify MTA endpoint URLs against current MTA developer documentation if it's been a while — they've changed before and the spec explicitly warns not to trust training data here.
