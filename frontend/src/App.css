@@ -163,21 +163,26 @@ body {
   overflow-wrap: anywhere;
   /* Auto-grow is driven by JS (see App.tsx) setting an inline height up to
      this cap; beyond it the box stops growing and scrolls internally
-     instead of pushing the Send button/layout around indefinitely. Raised
-     from 160px and given a transition so growth reads as a smooth expand
-     (like iMessage/WhatsApp's composer) rather than an abrupt snap -- the
-     160px cap meant any message past ~6 lines hit the OS's default,
-     boxy scrollbar almost immediately, which is what read as "a sliding
-     bar" rather than auto-expand.
+     instead of pushing the Send button/layout around indefinitely, with a
+     transition so growth reads as a smooth expand (like iMessage/
+     WhatsApp's composer) rather than an abrupt snap.
+
+     Capped at exactly 6 lines (2026-11-16, user), expressed from this
+     rule's own line-height/padding/border instead of a flat px guess so
+     it stays correct if those ever change: 6 lines at line-height 1.35em
+     (1.35 * 6 = 8.1em) plus the 13px top+bottom padding and 1.5px
+     top+bottom border above. Past this point the scrollbar reappearing
+     is intentional -- that's the real max-height cap, not the earlier
+     1-to-2-line false positive below.
 
      overflow-y stays hidden by default -- App.tsx's effect is the only
      thing that ever switches it to auto, and only once content has
-     genuinely grown past max-height. Leaving this as `auto` let the
+     genuinely grown past this cap. Leaving this as `auto` let the
      browser decide scrollbar visibility from its own scrollHeight-vs-
      box-height comparison, which could show a 1px sliver scrollbar as
      early as the 1-to-2-line transition from sub-pixel rounding alone,
      long before the cap was actually reached. */
-  max-height: 40vh;
+  max-height: calc(8.1em + 29px);
   overflow-y: hidden;
   transition: height 0.1s ease-out;
 }
