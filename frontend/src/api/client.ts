@@ -58,7 +58,19 @@ function requestLocation(): Promise<UserLocation | null> {
     }
     navigator.geolocation.getCurrentPosition(
       (position) => resolve({ lat: position.coords.latitude, lon: position.coords.longitude }),
-      () => resolve(null) // denied/unavailable -- design doc: no user_location sent, agent asks instead
+      () => resolve(null), // denied/unavailable -- design doc: no user_location sent, agent asks instead
+      // enableHighAccuracy (2026-11-16, real bug): without this, the
+      // browser defaults to fast, low-power WiFi/cell-tower triangulation,
+      // which can misplace a device by a mile or more in exactly the kind
+      // of dense, river-adjacent area this product's beachhead users are
+      // in (Roosevelt Island) -- confirmed live: a query from Roosevelt
+      // Island produced routes starting "walk to 96 St"/"walk to 86 St",
+      // ~1.5mi away on the Manhattan side, while plan_route given the
+      // REAL Roosevelt Island coordinates correctly returns the fast
+      // direct subway->Q70-SBS route. Forcing GPS (when available) is a
+      // zero-cost, one-flag fix for the actual root cause -- the routing
+      // engine itself was never wrong, only the location fed into it.
+      { enableHighAccuracy: true }
     )
   })
 }
