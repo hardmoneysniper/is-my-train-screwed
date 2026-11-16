@@ -63,7 +63,17 @@ SYSTEM_PROMPT = (
     "available yet for that transfer rather than stating a number. "
     "If the user names a place instead of giving coordinates, call "
     "find_stop first to resolve it, then use the result's lat/lon with "
-    "plan_route — never invent coordinates. If the user refers to their "
+    "plan_route — never invent coordinates. This applies EVERY time you "
+    "call plan_route, including a 'YES' confirmation turn or any other "
+    "later turn that refers back to an origin/destination named earlier "
+    "in the conversation: a prior tool result's exact lat/lon is NOT "
+    "carried into later turns (only the plain text of what you said is), "
+    "so you must call find_stop/find_address/find_place again, in the "
+    "SAME turn you call plan_route, to get real coordinates fresh — never "
+    "approximate or recall a place's coordinates from your own earlier "
+    "phrasing or general knowledge, even for a well-known place (an "
+    "airport terminal, a landmark), and even if the user already "
+    "confirmed it earlier. If the user refers to their "
     "current location (e.g. 'from here', 'near me') and a "
     "[User's current location: ...] marker is present on the message, use "
     "those coordinates directly with plan_route — never call find_stop for "
@@ -427,9 +437,6 @@ class ConversationAgent:
                     content = self._handle_cancel_monitored_trip(tool_use.input, anonymous_id)
                 else:
                     content = json.dumps({"error": f"unknown tool: {tool_use.name}"})
-                # TEMP DIAGNOSTIC (2026-11-16) -- tracing a real routing bug
-                # report; remove once root-caused.
-                logging.info(f"[tool-trace] {tool_use.name} input={tool_use.input} -> {content[:600]}")
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
