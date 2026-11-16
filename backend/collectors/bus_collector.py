@@ -31,6 +31,8 @@ from typing import Callable
 
 from google.transit import gtfs_realtime_pb2
 
+from app.day_type import day_type_for
+
 CORRIDORS = ["M60+", "Q102", "Q3", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
 # JFK-expansion candidates) + Q10/Q72/Q80/Q90 (user, 2026-09-28,
@@ -93,7 +95,43 @@ BASE_URL = "https://gtfsrt.prod.obanyc.com"
 ENDPOINTS = ["tripUpdates", "vehiclePositions"]
 MAX_BACKOFF_SECONDS = 300
 
+# Per-route day-type collection gate (2026-11-16, user: "end collection for
+# all buckets with good volume... only keep collecting at times... for
+# routes still catching up"). Written remotely by
+# scripts/hourly_bus_sync.py's push_day_type_gate() from real measured
+# reliability_buckets coverage -- this collector runs on Railway, where
+# that write lands as a plain local file at this same path, no network
+# call needed to read it. See _load_day_type_gate/_effective_corridors.
+DAY_TYPE_GATE_PATH = Path(__file__).parent.parent / "data" / ".bus_day_type_gate.json"
+
 _last_seen_date_str: str | None = None  # tracks day rollover so we compress exactly once per boundary
+_effective_corridors: list[str] = CORRIDORS  # narrowed each poll cycle by run_forever(), see below
+
+
+def _load_day_type_gate() -> dict:
+    """Fails open (returns {}, meaning "no restriction, collect
+    everything") on a missing or corrupt gate file -- this gate is a cost
+    optimization, never something that should silently under-collect
+    real data because of a read problem."""
+    try:
+        return json.loads(DAY_TYPE_GATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def compute_effective_corridors(now: datetime) -> list[str]:
+    """Which of CORRIDORS are actually worth polling right now. A route
+    absent from the gate (or if the gate file itself is missing/corrupt)
+    is always included -- fail-open. A route present in the gate is
+    included only if today's day_type is in its "still needed" list; an
+    empty list means both day types already cleared coverage, so it's
+    excluded entirely (the same end state as manually removing it from
+    CORRIDORS, e.g. Q70+/B15's history, just automatic)."""
+    gate = _load_day_type_gate()
+    if not gate:
+        return CORRIDORS
+    today_type = day_type_for(now.date())
+    return [route for route in CORRIDORS if route not in gate or today_type in gate[route]]
 
 
 def _api_key() -> str:
@@ -162,7 +200,7 @@ def _now_iso() -> str:
 
 def _record_from_trip_update(entity, polled_at: str) -> list[dict]:
     trip = entity.trip_update.trip
-    if trip.route_id not in CORRIDORS:
+    if trip.route_id not in _effective_corridors:
         return []
     vehicle_id = entity.trip_update.vehicle.id if entity.trip_update.HasField("vehicle") else None
     records = []
@@ -189,7 +227,7 @@ def _record_from_trip_update(entity, polled_at: str) -> list[dict]:
 
 def _record_from_vehicle_position(entity, polled_at: str) -> list[dict]:
     trip = entity.vehicle.trip
-    if trip.route_id not in CORRIDORS:
+    if trip.route_id not in _effective_corridors:
         return []
     has_position = entity.vehicle.HasField("position")
     return [{
@@ -230,13 +268,24 @@ def run_forever(should_continue: Callable[[], bool] | None = None):
     all remaining corridors are already well past their weekday targets,
     only weekend data is still needed -- main.py now wraps this with a
     weekend-only should_continue so collection pauses on weekdays instead
-    of continuing to collect data nobody needs."""
+    of continuing to collect data nobody needs. That blanket approach was
+    reverted on 2026-10-12 (see CLAUDE.md) once the "well past" premise
+    turned out to be wrong for every corridor; re-added 2026-11-16 at the
+    finer per-route, per-day-type granularity (_effective_corridors)
+    instead of a blanket should_continue, now that real coverage data
+    actually supports it for the weekday side."""
+    global _effective_corridors
     key = _api_key()
     backoff = POLL_INTERVAL_SECONDS
     print(f"[bus_collector] starting, corridors={CORRIDORS}, interval={POLL_INTERVAL_SECONDS}s, "
           f"writing to {DATA_DIR}", flush=True)
     while should_continue is None or should_continue():
         cycle_start = time.monotonic()
+        _effective_corridors = compute_effective_corridors(datetime.now(timezone.utc))
+        if not _effective_corridors:
+            print(f"[bus_collector] {_now_iso()} no corridor needs collecting today, skipping poll", flush=True)
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
         try:
             records = poll_once(key)
             if records:

@@ -13,10 +13,13 @@ from unittest.mock import patch
 
 from db import get_connection
 from scripts.hourly_bus_sync import (
+    REMOTE_DAY_TYPE_GATE,
+    REMOTE_DONE_MARKER,
     _is_citable_row,
     check_and_maybe_stop_collection,
     coverage_complete,
     local_route_day_type_counts,
+    needed_day_types,
     real_bucket_coverage,
     real_volume_coverage,
     sync_once,
@@ -381,11 +384,14 @@ def test_check_and_maybe_stop_collection_writes_marker_only_when_complete():
          patch("scripts.hourly_bus_sync.categorize_bus_data"), \
          patch("scripts.hourly_bus_sync.real_bucket_coverage",
                return_value={"M60+": {"weekday": (10, 100), "weekend": (10, 100)}}), \
-         patch("scripts.hourly_bus_sync._write_remote_marker", side_effect=lambda c: written.append(c)):
+         patch("scripts.hourly_bus_sync._write_remote_file", side_effect=lambda p, c: written.append((p, c))):
         stopped, coverage = check_and_maybe_stop_collection()
     assert stopped is False
     assert coverage == {"M60+": {"weekday": (10, 100), "weekend": (10, 100)}}
-    assert written == []
+    # The day-type gate is always pushed (both day types still below the
+    # completion fraction here, so M60+ stays needed on both) -- only the
+    # full-stop marker is conditional.
+    assert written == [(REMOTE_DAY_TYPE_GATE, json.dumps({"M60+": ["weekday", "weekend"]}))]
 
 
 def test_check_and_maybe_stop_collection_writes_marker_when_coverage_complete():
@@ -394,8 +400,45 @@ def test_check_and_maybe_stop_collection_writes_marker_when_coverage_complete():
          patch("scripts.hourly_bus_sync.categorize_bus_data"), \
          patch("scripts.hourly_bus_sync.real_bucket_coverage",
                return_value={"M60+": {"weekday": (95, 100), "weekend": (95, 100)}}), \
-         patch("scripts.hourly_bus_sync._write_remote_marker", side_effect=lambda c: written.append(c)):
+         patch("scripts.hourly_bus_sync._write_remote_file", side_effect=lambda p, c: written.append((p, c))):
         stopped, coverage = check_and_maybe_stop_collection()
     assert stopped is True
     assert coverage == {"M60+": {"weekday": (95, 100), "weekend": (95, 100)}}
-    assert len(written) == 1
+    # Gate push (M60+ now needs neither day type) then the full-stop marker.
+    assert written == [
+        (REMOTE_DAY_TYPE_GATE, json.dumps({"M60+": []})),
+        (REMOTE_DONE_MARKER, json.dumps({"M60+": {"weekday": (95, 100), "weekend": (95, 100)}})),
+    ]
+
+
+def test_needed_day_types_keeps_both_needed_while_combined_pool_is_incomplete():
+    # Route overall isn't combined-complete yet (135/300 = 45%), so
+    # weekend's zero evidence must stay in the "needed" list rather than
+    # being mistaken for "done" -- and weekday, despite its own figures
+    # being far from 90%, is checked per-day-type here too.
+    coverage = {"Q90": {"weekday": (70, 100), "weekend": (0, 0)}}
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["Q90"]):
+        assert needed_day_types(coverage) == {"Q90": ["weekday", "weekend"]}
+
+
+def test_needed_day_types_drops_a_day_type_once_it_clears_the_fraction():
+    # Combined pool (135/300 = 45%) is still incomplete, so this falls
+    # through to the per-day-type check: weekday is individually done
+    # (95%), weekend lags (20%) -- the real current shape of every active
+    # corridor (weekday 92-99%, weekend 55-84%, see CLAUDE.md 2026-11-16).
+    coverage = {"Q90": {"weekday": (95, 100), "weekend": (40, 200)}}
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["Q90"]):
+        assert needed_day_types(coverage) == {"Q90": ["weekend"]}
+
+
+def test_needed_day_types_stops_both_once_the_combined_pool_clears_despite_a_thin_remainder():
+    # Regression (code review, 2026-11-16): a route whose COMBINED pool
+    # already clears the fraction (190/200 = 95%) must not stay gated to
+    # collect weekend forever just because weekend's own thin remainder
+    # (0/5) never clears individually -- the exact "double-penalizes a
+    # thin remainder" problem coverage_complete() itself was redesigned
+    # on 2026-10-12 to avoid (same fixture as
+    # test_coverage_complete_is_true_when_weekend_is_thin_but_combined_pool_clears).
+    coverage = {"M60+": {"weekday": (190, 195), "weekend": (0, 5)}}
+    with patch("scripts.hourly_bus_sync.CORRIDORS", ["M60+"]):
+        assert needed_day_types(coverage) == {"M60+": []}

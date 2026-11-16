@@ -54,6 +54,7 @@ LOCAL_PIPELINE_DB_PATH = Path(__file__).parent.parent / "data" / "local_pipeline
 SERVICE_ID = BACKEND_SERVICE_ID
 REMOTE_BUS_DIR = "/app/data/raw/bus"
 REMOTE_DONE_MARKER = "/app/data/.bus_collection_complete"
+REMOTE_DAY_TYPE_GATE = "/app/data/.bus_day_type_gate.json"
 
 # Cost incident 2026-09-22, fixed 2026-09-28: this target-check used to
 # live in backend/app/main.py, computed from Railway's OWN raw/bus
@@ -167,13 +168,13 @@ def _delete_remote_file(filename: str) -> None:
         raise RuntimeError(f"deleting {filename} failed: {result.stderr.decode(errors='replace')}")
 
 
-def _write_remote_marker(content: str) -> None:
+def _write_remote_file(remote_path: str, content: str) -> None:
     result = _railway_ssh(
-        "sh", "-c", f"mkdir -p /app/data && cat > {REMOTE_DONE_MARKER}",
+        "sh", "-c", f"mkdir -p /app/data && cat > {remote_path}",
         input=content.encode("utf-8"),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"writing remote marker failed: {result.stderr.decode(errors='replace')}")
+        raise RuntimeError(f"writing {remote_path} failed: {result.stderr.decode(errors='replace')}")
 
 
 def local_route_day_type_counts() -> dict[str, dict[str, int]]:
@@ -403,18 +404,75 @@ def coverage_complete(coverage: dict[str, dict[str, tuple[int, int]]]) -> bool:
     return True
 
 
+def needed_day_types(coverage: dict[str, dict[str, tuple[int, int]]]) -> dict[str, list[str]]:
+    """{route: [day_types still worth polling for]}. (2026-11-16, user:
+    "end collection for all buckets with good volume... only keep
+    collecting at times... for routes still catching up") -- every
+    currently active corridor has already cleared >=92% weekday coverage
+    while weekend lags at 55-84%, so this naturally gates weekday polling
+    off and keeps weekend on, without needing CORRIDORS edited by hand
+    the way a route's full removal (Q70+, B15) always has been. A route
+    that clears BOTH day types ends up with an empty list here, which
+    collectors/bus_collector.py treats as "never poll this route" -- the
+    same end state as removing it from CORRIDORS, just automatic.
+
+    Checks the route's COMBINED (pooled weekday+weekend) coverage first,
+    the same way coverage_complete() does, and only if that combined pool
+    is still below the fraction does it fall through to a per-day-type
+    check for which specific day type is still worth polling. A code
+    review (2026-11-16) caught a real regression in an earlier version of
+    this function that checked each day type independently from the
+    start: that's exactly the "double-penalizes a route whose thin
+    remainder day type was mostly absorbed by bus_schedule_periods'
+    equivalent-hour merge" problem coverage_complete() itself was
+    redesigned on 2026-10-12 to avoid (see that function's own
+    docstring) -- a route that's already combined-complete but still has
+    a tiny, never-clearing weekend-specific bucket would otherwise stay
+    gated to collect weekend forever, even though the product's own
+    adopted completion standard already says it's done."""
+    gate: dict[str, list[str]] = {}
+    for route in CORRIDORS:
+        day_coverage = coverage.get(route, {})
+        combined_cleared = sum(day_coverage.get(dt, (0, 0))[0] for dt in ("weekday", "weekend"))
+        combined_total = sum(day_coverage.get(dt, (0, 0))[1] for dt in ("weekday", "weekend"))
+        if combined_total > 0 and combined_cleared / combined_total >= COVERAGE_COMPLETION_FRACTION:
+            gate[route] = []
+            continue
+        gate[route] = [
+            day_type for day_type in ("weekday", "weekend")
+            if day_coverage.get(day_type, (0, 0))[1] == 0
+            or day_coverage[day_type][0] / day_coverage[day_type][1] < COVERAGE_COMPLETION_FRACTION
+        ]
+    return gate
+
+
+def push_day_type_gate(coverage: dict[str, dict[str, tuple[int, int]]]) -> dict[str, list[str]]:
+    """Computes and pushes the day-type gate collectors/bus_collector.py
+    reads remotely (see REMOTE_DAY_TYPE_GATE and that module's
+    _load_day_type_gate) -- pushed every run regardless of whether full
+    collection stops, since this is a softer, per-route-per-day-type
+    restriction that should track the latest measured coverage, not a
+    one-time final decision."""
+    gate = needed_day_types(coverage)
+    _write_remote_file(REMOTE_DAY_TYPE_GATE, json.dumps(gate))
+    return gate
+
+
 def check_and_maybe_stop_collection() -> tuple[bool, dict[str, dict[str, tuple[int, int]]]]:
     """Categorizes the latest synced data, measures real bucket coverage,
-    and writes the stop marker to Railway (main.py's own loop watches for
-    it and cancels the collector) if every tracked corridor has cleared
-    COVERAGE_COMPLETION_FRACTION for both day types. Returns (marker_
-    written, coverage) -- the caller logs coverage either way, so a
-    "still collecting" run still reports real per-corridor progress."""
+    pushes the day-type gate (see push_day_type_gate), and writes the
+    full-stop marker to Railway (main.py's own loop watches for it and
+    cancels the collector entirely) if every tracked corridor has
+    cleared COVERAGE_COMPLETION_FRACTION for both day types COMBINED.
+    Returns (marker_written, coverage) -- the caller logs coverage
+    either way, so a "still collecting" run still reports real
+    per-corridor progress."""
     categorize_bus_data()
     coverage = real_bucket_coverage()
+    push_day_type_gate(coverage)
     if not coverage_complete(coverage):
         return False, coverage
-    _write_remote_marker(json.dumps(coverage))
+    _write_remote_file(REMOTE_DONE_MARKER, json.dumps(coverage))
     return True, coverage
 
 
