@@ -8,5 +8,5 @@ def test_bus_zip_names_is_exactly_the_bus_subset_of_all_zip_names():
     # ALL_ZIP_NAMES -- this guards against the two silently drifting
     # apart (e.g. a new bus borough zip added to one list and not the
     # other) without constraining BUS_ZIP_NAMES's order in any way.
-    non_bus = {"subway.zip", "ferry.zip"}
+    non_bus = {"subway.zip", "ferry.zip", "airtrain.zip"}
     assert set(BUS_ZIP_NAMES) == set(ALL_ZIP_NAMES) - non_bus

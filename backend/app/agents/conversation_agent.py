@@ -102,7 +102,11 @@ SYSTEM_PROMPT = (
     "the user's exact device location marker — that's already exact, no "
     "confirmation needed), show them exactly what you resolved it to "
     "(the real stop name, matched address, or matched place) and ask "
-    "them to confirm before calling plan_route, e.g. \"Did you mean "
+    "them to confirm before calling plan_route — using the name/address "
+    "text only, never the raw lat/lon numbers; a rider can't recognize or "
+    "verify a coordinate pair, so stating one is both useless to them and "
+    "a hint you're treating the number itself as the confirmation instead "
+    "of the place name. E.g. \"Did you mean "
     "Lexington Av/63 St? Reply YES if this is correct.\" Only call "
     "plan_route once they confirm. If they say no or give a correction, "
     "resolve the new answer the same way and ask again — never guess "
@@ -227,13 +231,24 @@ SYSTEM_PROMPT = (
     "deadline_ts, in epoch milliseconds. If the deadline is unclear or you're not\n"
     "sure what date/time they mean, ask rather than guessing — never invent a\n"
     "deadline_ts from an ambiguous statement.\n\n"
-    "After create_monitored_trip succeeds, tell the user you're monitoring the\n"
-    "trip. If its result includes a non-null depart_by_ts, also tell them the\n"
-    "latest safe departure time (format the epoch-millisecond timestamp as a\n"
-    "local clock time, the same way you already format itinerary leg times) —\n"
-    "this is real data from the trip's historical delay patterns, not a guess.\n"
-    "If depart_by_ts is null, don't mention a departure time at all — don't\n"
-    "explain why, just omit it.\n\n"
+    "After create_monitored_trip succeeds: if its result has deadline_missed: "
+    "true, the deadline is ALREADY unreachable from right now — tell the user "
+    "plainly they can't arrive by their stated deadline, then state "
+    "earliest_arrival_ts (the real earliest they could arrive if leaving "
+    "right now, formatted as a local clock time) instead of any departure "
+    "time — never state depart_by_ts in this case (it's null exactly "
+    "because there's no meaningful 'leave by' time left). If earliest_"
+    "arrival_ts is ALSO null here, say you can't calculate a real earliest "
+    "arrival right now rather than inventing one. Still tell them you're "
+    "monitoring the trip either way, since monitoring remains useful for "
+    "disruption alerts even once the original deadline is missed.\n"
+    "Otherwise (deadline_missed is false), tell the user you're monitoring "
+    "the trip. If its result includes a non-null depart_by_ts, also tell "
+    "them the latest safe departure time (format the epoch-millisecond "
+    "timestamp as a local clock time, the same way you already format "
+    "itinerary leg times) — this is real data from the trip's historical "
+    "delay patterns, not a guess. If depart_by_ts is null, don't mention a "
+    "departure time at all — don't explain why, just omit it.\n\n"
     "Recognize when the user is done with a monitored trip — phrases like \"I'm\n"
     "here,\" \"I made it,\" \"cancel this trip,\" \"stop monitoring\" — and call\n"
     "cancel_monitored_trip. If its result has \"error\": \"ambiguous\", it means the\n"
@@ -316,7 +331,7 @@ class ConversationAgent:
         risks = risk_engine.get_risk(itinerary)
         return json.dumps([r.model_dump() for r in risks])
 
-    def _handle_create_monitored_trip(
+    async def _handle_create_monitored_trip(
         self, tool_input: dict, last_itineraries: list[Itinerary], anonymous_id: str
     ) -> str:
         itinerary_index = tool_input.get("itinerary_index", 0)
@@ -324,7 +339,6 @@ class ConversationAgent:
             return json.dumps({"error": "no itinerary available yet — call plan_route first"})
         itinerary = last_itineraries[itinerary_index]
         deadline_ts = tool_input.get("deadline_ts")
-        trip_id = monitoring.create_monitored_trip(itinerary, anonymous_id, deadline_ts)
         # depart_by_ts is computed separately from create_monitored_trip, here
         # in dispatch code, rather than inside that function -- this keeps
         # create_monitored_trip's own signature exactly `-> int` (per the
@@ -335,9 +349,39 @@ class ConversationAgent:
         # data -- SYSTEM_PROMPT tells the agent to treat both cases
         # identically (omit the departure time, no explanation).
         depart_by_ts = None
+        deadline_missed = False
+        earliest_arrival_ts = None
         if deadline_ts is not None:
             depart_by_ts = deadline.compute_deadline_threshold(itinerary, deadline_ts)
-        return json.dumps({"trip_id": trip_id, "depart_by_ts": depart_by_ts})
+            # Real bug report (2026-11-16): a depart_by_ts at or before right
+            # now means the deadline is ALREADY unreachable -- reciting it as
+            # "leave by HH:MM" tells the user to travel back in time (e.g.
+            # "leave by 2:17 PM" when it's already 3:45 PM). Compute the real
+            # earliest possible arrival if they left RIGHT NOW instead, via a
+            # fresh plan_route call -- not arithmetic on the stale itinerary,
+            # since the actual next real-time departure/trip may differ from
+            # whatever was scheduled when the original itinerary was planned
+            # -- so the agent can tell them plainly the deadline is missed
+            # AND when they'd really arrive, instead of narrating an
+            # already-past time as if it were still actionable.
+            now_ms = round(datetime.now(timezone.utc).timestamp() * 1000)
+            if depart_by_ts is not None and depart_by_ts <= now_ms:
+                deadline_missed = True
+                depart_by_ts = None
+                origin_leg, dest_leg = itinerary.legs[0], itinerary.legs[-1]
+                if await ensure_otp_awake():
+                    fresh = await self._otp.plan_route(
+                        origin_leg.from_lat, origin_leg.from_lon, dest_leg.to_lat, dest_leg.to_lon,
+                    )
+                    if fresh:
+                        earliest_arrival_ts = fresh[0].legs[-1].end_time_ms
+        trip_id = monitoring.create_monitored_trip(itinerary, anonymous_id, deadline_ts)
+        return json.dumps({
+            "trip_id": trip_id,
+            "depart_by_ts": depart_by_ts,
+            "deadline_missed": deadline_missed,
+            "earliest_arrival_ts": earliest_arrival_ts,
+        })
 
     def _handle_cancel_monitored_trip(self, tool_input: dict, anonymous_id: str) -> str:
         trip_id = tool_input.get("trip_id")
@@ -441,7 +485,7 @@ class ConversationAgent:
                     place_result = await find_place(resolved_query, original_query)
                     content = json.dumps(place_result)
                 elif tool_use.name == "create_monitored_trip":
-                    content = self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
+                    content = await self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)
                 elif tool_use.name == "cancel_monitored_trip":
                     content = self._handle_cancel_monitored_trip(tool_use.input, anonymous_id)
                 else:

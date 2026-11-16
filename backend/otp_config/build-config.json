@@ -34,6 +34,11 @@
       "type": "gtfs",
       "feedId": "NYCFerry",
       "source": "file:///var/opentripplanner/ferry.zip"
+    },
+    {
+      "type": "gtfs",
+      "feedId": "JFKAirtrain",
+      "source": "file:///var/opentripplanner/airtrain.zip"
     }
   ]
 }

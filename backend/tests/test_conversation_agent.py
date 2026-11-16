@@ -738,6 +738,10 @@ async def test_create_monitored_trip_with_deadline_dispatches_without_prior_get_
         usage=_fake_usage(),
     )
 
+    # A real future timestamp relative to wall-clock "now" -- this is the
+    # feasible-deadline branch, not the deadline_missed one below.
+    future_depart_by_ts = round(datetime.now(timezone.utc).timestamp() * 1000) + 3_600_000
+
     with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
          patch("app.agents.conversation_agent.risk_engine.get_risk") as mock_get_risk, \
          patch("app.agents.conversation_agent.monitoring.create_monitored_trip") as mock_create, \
@@ -745,7 +749,7 @@ async def test_create_monitored_trip_with_deadline_dispatches_without_prior_get_
          patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
         mock_plan.return_value = [itinerary]
         mock_create.return_value = 7
-        mock_deadline.return_value = 1_700_005_000_000
+        mock_deadline.return_value = future_depart_by_ts
         mock_client = mock_anthropic_cls.return_value
         mock_client.messages.create = AsyncMock(
             side_effect=[plan_route_response, create_response, final_response]
@@ -763,7 +767,68 @@ async def test_create_monitored_trip_with_deadline_dispatches_without_prior_get_
     tool_result_message = mock_client.messages.create.call_args_list[2].kwargs["messages"][-1]
     tool_result_content = tool_result_message["content"][0]["content"]
     import json
-    assert json.loads(tool_result_content) == {"trip_id": 7, "depart_by_ts": 1_700_005_000_000}
+    assert json.loads(tool_result_content) == {
+        "trip_id": 7, "depart_by_ts": future_depart_by_ts,
+        "deadline_missed": False, "earliest_arrival_ts": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_monitored_trip_with_an_already_unreachable_deadline():
+    # Real bug report (2026-11-16): compute_deadline_threshold returning a
+    # depart_by_ts at or before right now means the deadline is already
+    # unreachable -- the agent must not narrate that past timestamp as a
+    # "leave by" time. Instead it re-plans from the itinerary's own
+    # origin/destination to get a real earliest-arrival-if-leaving-now time.
+    itinerary = _fake_itinerary()
+    deadline_ts = 1_700_010_000_000
+    past_depart_by_ts = round(datetime.now(timezone.utc).timestamp() * 1000) - 3_600_000
+    fresh_itinerary = _fake_itinerary()
+    fresh_itinerary.legs[-1].end_time_ms = 9_999_999_999_999
+
+    plan_route_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("plan_route", "tool_1", {"from_lat": 40.7597, "from_lon": -73.9532,
+                                   "to_lat": 40.7644, "to_lon": -73.9656})],
+        usage=_fake_usage(),
+    )
+    create_response = MagicMock(
+        stop_reason="tool_use",
+        content=[_tool_use("create_monitored_trip", "tool_2", {"deadline_ts": deadline_ts})],
+        usage=_fake_usage(),
+    )
+    final_response = MagicMock(
+        stop_reason="end_turn",
+        content=[MagicMock(type="text", text="You can't make that deadline.")],
+        usage=_fake_usage(),
+    )
+
+    with patch("app.agents.conversation_agent.OTPClient.plan_route", new_callable=AsyncMock) as mock_plan, \
+         patch("app.agents.conversation_agent.monitoring.create_monitored_trip") as mock_create, \
+         patch("app.agents.conversation_agent.deadline.compute_deadline_threshold") as mock_deadline, \
+         patch("app.agents.conversation_agent.ensure_otp_awake", new_callable=AsyncMock) as mock_otp_awake, \
+         patch("app.agents.conversation_agent.AsyncAnthropic") as mock_anthropic_cls:
+        mock_plan.side_effect = [[itinerary], [fresh_itinerary]]
+        mock_create.return_value = 7
+        mock_deadline.return_value = past_depart_by_ts
+        mock_otp_awake.return_value = True
+        mock_client = mock_anthropic_cls.return_value
+        mock_client.messages.create = AsyncMock(
+            side_effect=[plan_route_response, create_response, final_response]
+        )
+
+        agent = ConversationAgent()
+        reply = await agent.respond("I need to be there by a deadline, monitor it.",
+                                     conversation_history=[], anonymous_id="anon-1")
+
+    assert reply == "You can't make that deadline."
+    tool_result_message = mock_client.messages.create.call_args_list[2].kwargs["messages"][-1]
+    tool_result_content = tool_result_message["content"][0]["content"]
+    import json
+    assert json.loads(tool_result_content) == {
+        "trip_id": 7, "depart_by_ts": None,
+        "deadline_missed": True, "earliest_arrival_ts": 9_999_999_999_999,
+    }
 
 
 @pytest.mark.asyncio

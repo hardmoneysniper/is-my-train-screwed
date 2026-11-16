@@ -30,6 +30,7 @@ ALL_ZIP_NAMES = [
     "bus_queens.zip",
     "bus_staten_island.zip",
     "ferry.zip",
+    "airtrain.zip",
 ]
 
 BUS_ZIP_NAMES = [
