@@ -31,8 +31,7 @@
 
   /* Mobile-first base: a stacked flow, no fixed canvas aspect. Headline
      and "Ask me." share one font-size (the source PDFs set both at the
-     same 150pt) with the hashtag at exactly a third of that -- the PDF's
-     own 50pt:150pt ratio, carried through at every size. */
+     same 150pt). */
 
   .stage{
     min-height:100vh;
@@ -40,11 +39,7 @@
     width:100%;
     /* the flex column + gap + padding used to live on .canvas -- moved
        here because .canvas is display:contents on mobile now (see
-       below), so it can no longer render its own box/padding/gap.
-       .signup and .hashtag both need to be real siblings of the hero
-       pieces in ONE flex context for `order` to sequence them (hashtag
-       now sits after the signup section), and .canvas's children can
-       only join that context by being "seen through" via contents. */
+       below), so it can no longer render its own box/padding/gap. */
     display:flex;
     flex-direction:column;
     gap: clamp(14px, 3.2dvh, 26px);
@@ -56,9 +51,8 @@
        reverts to block and this becomes a real positioned box again */
     position:relative;
     /* contents: this element renders no box of its own on mobile -- its
-       children (headline-viewport, ask-me, hashtag) become direct flex
-       items of .stage instead, joining .bubble-stage and .signup (which
-       are already .stage's direct children) in one shared flex/order
+       children (headline-viewport, ask-me, bubble-stage) become direct
+       flex items of .stage instead, joining it in one shared flex/order
        context */
     display:contents;
   }
@@ -147,134 +141,6 @@
     outline-offset:4px;
   }
 
-  .hashtag{
-    order:5;
-    flex:none;
-    margin:0;
-    font-weight:700;
-    letter-spacing:0.01em;
-    /* PDF sets this at exactly 1/3 the headline size (50pt vs 150pt) --
-       kept close to that ratio but with a mobile legibility floor, since
-       a literal 1/3 of the mobile headline runs under 10px */
-    font-size: clamp(0.8rem, 2.8vw, 1.05rem);
-    /* it's a <button> now (opens the signup popup on wide screens) --
-       reset it back to looking like the plain text it always was */
-    border:0;
-    background:none;
-    padding:0;
-    color:inherit;
-    font-family:inherit;
-    text-align:left;
-    cursor:pointer;
-    /* hidden on mobile (user, 2026-11-16) -- the signup section itself
-       stays always-visible inline there regardless (see the signup JS
-       comment below), so this is purely dropping a duplicate CTA, not
-       any real signup functionality. Desktop re-enables it (and reads
-       "Join the interest list" instead of the hashtag) as the popup
-       trigger it always was. */
-    display:none;
-  }
-  .hashtag:focus-visible{
-    outline:2px solid var(--signal);
-    outline-offset:4px;
-  }
-
-  /* ---------- interest-list signup: always-visible section on mobile,
-     a popup on wide screens (triggered by the hashtag or a 20s timer)
-     ---------- */
-
-  .signup{
-    order:4;
-    width:100%;
-    padding: clamp(4px, 1vh, 12px) 0 0;
-  }
-  .signup-card{
-    width:100%;
-    max-width:480px;
-  }
-  .signup-close{ display:none; }
-  .signup-question, .signup-cta{
-    margin:0;
-    text-align:center;
-    font-weight:700;
-    letter-spacing:0.01em;
-    font-size: clamp(1.05rem, 4.4vw, 1.35rem);
-    line-height:1.25;
-  }
-  .signup-cta{ color:var(--signal); margin-bottom: clamp(10px, 3vh, 18px); }
-  .signup-form{
-    display:flex;
-    flex-direction:column;
-    align-items:center;
-    gap:12px;
-  }
-  .signup-input{
-    width:100%;
-    padding:13px 16px;
-    border-radius:12px;
-    border:1.5px solid rgba(10,10,10,0.15);
-    font-family:inherit;
-    font-weight:500;
-    letter-spacing:0.01em;
-    font-size: clamp(0.9rem, 3.6vw, 1rem);
-    color:var(--ink);
-    background:#fff;
-    text-align:center;
-  }
-  .signup-input::placeholder{
-    color:rgba(10,10,10,0.4);
-    font-weight:500;
-  }
-  .signup-input:focus-visible{
-    outline:2px solid var(--signal);
-    outline-offset:2px;
-    border-color:transparent;
-  }
-  .signup-submit{
-    padding:13px 28px;
-    border-radius:12px;
-    border:none;
-    background:var(--signal);
-    color:var(--signal-ink);
-    font-family:inherit;
-    font-weight:700;
-    letter-spacing:0.01em;
-    font-size: clamp(0.9rem, 3.6vw, 1rem);
-    cursor:pointer;
-  }
-  .signup-submit:hover{ filter:brightness(1.08); }
-  .signup-submit:focus-visible{
-    outline:2px solid var(--ink);
-    outline-offset:2px;
-  }
-  /* success state: replaces the whole prompt (title, cta, and form --
-     not just the form) in place once submitted, so the "already
-     answered" question isn't left sitting next to the confirmation.
-
-     display is set on :not([hidden]), not on .signup-success itself --
-     an unconditional `display:flex` here would always beat the browser's
-     built-in `[hidden]{display:none}` rule (author CSS overrides the
-     user-agent stylesheet regardless of specificity), which is exactly
-     why this was visible before submission despite the hidden attribute
-     being set correctly in the HTML/JS the whole time. */
-  .signup-success:not([hidden]){
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    text-align:center;
-    padding: clamp(16px, 4vh, 28px) 0;
-  }
-  .signup-success-text{
-    margin:0;
-    font-weight:700;
-    letter-spacing:0.01em;
-    /* deliberately smaller than .signup-question -- this is a quiet
-       confirmation, not another headline-weight statement */
-    font-size: clamp(0.85rem, 3.2vw, 1.05rem);
-    line-height:1.3;
-  }
-  .signup-success p{ margin:0; }
-
   .bubble-stage{
     order:3;
     flex:none;
@@ -313,8 +179,7 @@
 
   @media (min-width: 760px){
     /* reset the mobile flex-column/gap/padding .stage picked up so
-       .canvas (its only remaining real flex item -- .signup is
-       position:fixed and out of flow here) centers cleanly again */
+       .canvas (its only remaining real flex item) centers cleanly again */
     .stage{ display:flex; flex-direction:row; align-items:center; justify-content:center; gap:0; padding:0; }
 
     .canvas{
@@ -343,68 +208,12 @@
       font-size: 7.8125cqw;
     }
 
-    .hashtag{
-      display:block;
-      position:absolute;
-      left:3.8%; bottom:5.7%;
-      font-size: 2.604cqw;
-    }
-
     .bubble-stage{
       position:absolute;
       left:38.8%; top:40.75%;
       width:52.2%; height:42.35%;
     }
     .bubbles-viewport{ border-radius:0; }
-
-    /* signup becomes a popup: fixed backdrop, hidden until .is-open */
-    .signup{
-      position:fixed;
-      inset:0;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding:24px;
-      background:rgba(10,10,10,0.5);
-      opacity:0;
-      visibility:hidden;
-      z-index:100;
-    }
-    @media (prefers-reduced-motion:no-preference){
-      .signup{ transition: opacity 260ms ease; }
-      .signup-card{ transition: transform 260ms ease; }
-    }
-    .signup.is-open{ opacity:1; visibility:visible; }
-    .signup-card{
-      position:relative;
-      width:100%;
-      background:#fff;
-      border-radius:20px;
-      padding:40px 36px;
-      box-shadow:0 20px 60px rgba(0,0,0,0.25);
-      transform:translateY(8px);
-    }
-    .signup.is-open .signup-card{ transform:translateY(0); }
-    .signup-close{
-      display:flex;
-      position:absolute;
-      top:12px; right:12px;
-      width:32px; height:32px;
-      align-items:center;
-      justify-content:center;
-      border:none;
-      background:transparent;
-      border-radius:50%;
-      font-size:1.4rem;
-      line-height:1;
-      color:rgba(10,10,10,0.5);
-      cursor:pointer;
-    }
-    .signup-close:hover{ background:rgba(10,10,10,0.06); }
-    .signup-close:focus-visible{ outline:2px solid var(--signal); outline-offset:2px; }
-    .signup-question, .signup-cta{ font-size: clamp(1.4rem, 2.4vw, 1.9rem); }
-    .signup-input, .signup-submit{ font-size: clamp(0.95rem, 1.3vw, 1.05rem); }
-    .signup-success-text{ font-size: clamp(1rem, 1.5vw, 1.2rem); }
   }
 
   @media (max-height: 480px) and (max-width: 759px){
@@ -448,24 +257,6 @@
       </div>
 
       <a class="ask-me" href="https://backend-production-5fb5.up.railway.app/" target="_blank" rel="noopener noreferrer">Ask me.</a>
-      <button type="button" class="hashtag" id="hashtagBtn" aria-haspopup="true" style="color: #0096FF;">Join the interest list</button>
-    </div>
-
-    <div class="signup" id="signup">
-      <div class="signup-card">
-        <button type="button" class="signup-close" id="signupClose" aria-label="Close">&times;</button>
-        <div class="signup-prompt" id="signupPrompt">
-          <p class="signup-question" id="signupHeading">Want to know more?</p>
-          <p class="signup-cta">Join the interest list.</p>
-          <form class="signup-form" id="signupForm">
-            <input class="signup-input" type="email" name="email" placeholder="useremail@example.com" aria-label="Email address" required>
-            <button type="submit" class="signup-submit">Notify me</button>
-          </form>
-        </div>
-        <div class="signup-success" id="signupSuccess" role="status" aria-live="polite" hidden>
-          <p class="signup-success-text">Thanks, we will be in touch soon.</p>
-        </div>
-      </div>
     </div>
   </main>
 
@@ -532,66 +323,6 @@
   // the transition rules above), so content still cycles, it just cuts
   // instantly instead of sliding, rather than freezing on slide 1 forever.
   setInterval(advance, SLIDE_MS);
-})();
-
-(function(){
-  // Interest-list signup. On mobile this markup is always visible inline
-  // (see the base CSS) -- opening/closing it there is a visual no-op,
-  // since .is-open styling only exists inside the >=760px media query.
-  // On wide screens it's a real popup: opens after 20s or on a hashtag
-  // click, closes via the X, a backdrop click, or Escape.
-  var AUTO_OPEN_MS = 20000;
-  var signupEl = document.getElementById('signup');
-  var hashtagBtn = document.getElementById('hashtagBtn');
-  var closeBtn = document.getElementById('signupClose');
-  var form = document.getElementById('signupForm');
-  var input = form.querySelector('.signup-input');
-  var promptEl = document.getElementById('signupPrompt');
-  var successEl = document.getElementById('signupSuccess');
-  // matches the >=760px breakpoint everywhere else in the CSS -- below
-  // it, .signup is always-visible inline content, not a real popup, so
-  // stealing focus/scroll into it on open (e.g. from the 20s timer)
-  // would be a jarring surprise with no visible cause
-  var isPopupContext = window.matchMedia('(min-width: 760px)');
-
-  function isOpen(){
-    return signupEl.classList.contains('is-open');
-  }
-
-  function openSignup(){
-    if (isOpen()) return;
-    signupEl.classList.add('is-open');
-    if (isPopupContext.matches) input.focus();
-  }
-
-  function closeSignup(){
-    if (!isOpen()) return;
-    signupEl.classList.remove('is-open');
-    if (isPopupContext.matches) hashtagBtn.focus();
-  }
-
-  hashtagBtn.addEventListener('click', openSignup);
-  closeBtn.addEventListener('click', closeSignup);
-  signupEl.addEventListener('click', function(e){
-    if (e.target === signupEl) closeSignup(); // backdrop click, not the card itself
-  });
-  document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape' && isOpen()) closeSignup();
-  });
-
-  window.setTimeout(openSignup, AUTO_OPEN_MS);
-
-  form.addEventListener('submit', function(e){
-    e.preventDefault();
-    // No signup backend exists yet -- this is a pre-launch teaser, ahead
-    // of Phase 1. This just replaces the whole prompt (title + form,
-    // not just the form) with a local confirmation, right when the user
-    // submits -- same on mobile inline and in the desktop popup. Wire it
-    // to a real endpoint once that infrastructure exists.
-    form.reset();
-    promptEl.hidden = true;
-    successEl.hidden = false;
-  });
 })();
 </script>
 </body>
