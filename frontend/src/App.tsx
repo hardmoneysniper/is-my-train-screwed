@@ -166,13 +166,24 @@ export default function App() {
     return () => clearInterval(interval)
   }, [sending])
 
-  // Auto-grow the composer to fit its content (up to the CSS max-height
-  // cap in App.css, where it switches to an internal scrollbar instead).
+  // Auto-grow the composer to fit its content, up to the CSS max-height
+  // cap in App.css. Below the cap this must never show a scrollbar --
+  // relying on the browser's own overflow-y:auto to decide that (the
+  // previous approach) showed a 1px sliver scrollbar as early as the
+  // 1-to-2-line transition, because scrollHeight's rounding doesn't
+  // always exactly match the rendered box height. The fix other chat
+  // composers (ChatGPT, Claude.ai) use: keep overflow hidden by default
+  // and only switch it on here, in JS, once content has actually grown
+  // past the real (viewport-resolved) cap -- never left for the browser
+  // to decide from a possibly-off-by-a-pixel comparison.
   useEffect(() => {
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
+    const maxHeight = parseFloat(getComputedStyle(el).maxHeight) || Infinity
+    const overflowing = el.scrollHeight > maxHeight
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`
+    el.style.overflowY = overflowing ? 'auto' : 'hidden'
   }, [input])
 
   async function sendMessage() {

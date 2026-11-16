@@ -168,9 +168,17 @@ body {
      (like iMessage/WhatsApp's composer) rather than an abrupt snap -- the
      160px cap meant any message past ~6 lines hit the OS's default,
      boxy scrollbar almost immediately, which is what read as "a sliding
-     bar" rather than auto-expand. */
+     bar" rather than auto-expand.
+
+     overflow-y stays hidden by default -- App.tsx's effect is the only
+     thing that ever switches it to auto, and only once content has
+     genuinely grown past max-height. Leaving this as `auto` let the
+     browser decide scrollbar visibility from its own scrollHeight-vs-
+     box-height comparison, which could show a 1px sliver scrollbar as
+     early as the 1-to-2-line transition from sub-pixel rounding alone,
+     long before the cap was actually reached. */
   max-height: 40vh;
-  overflow-y: auto;
+  overflow-y: hidden;
   transition: height 0.1s ease-out;
 }
 
