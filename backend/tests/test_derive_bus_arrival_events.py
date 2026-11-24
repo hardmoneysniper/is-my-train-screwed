@@ -390,12 +390,17 @@ def test_run_derive_processes_both_ndjson_and_gz_files_in_directory(tmp_path, co
 
     day1 = date(2026, 8, 24)  # Monday -> weekday
     day2 = date(2026, 8, 29)  # Saturday -> weekend
+    # service_date/day_type are derived from each record's own polled_at
+    # (converted to local time), not the file's nominal name (2026-11-20
+    # fix) -- so these records' timestamps must themselves actually fall
+    # on day1/day2 for the test to exercise what its name says.
+    t0_day1 = datetime(2026, 8, 24, 18, 47, 20, tzinfo=timezone.utc)
 
     _write_ndjson(
         raw_dir / f"{day1.isoformat()}.ndjson",
         [
-            _record(T0, stop_id="S1", vehicle_id="VA"),
-            _record(T0 + timedelta(seconds=30), stop_id="S2", vehicle_id="VA"),
+            _record(t0_day1, stop_id="S1", vehicle_id="VA"),
+            _record(t0_day1 + timedelta(seconds=30), stop_id="S2", vehicle_id="VA"),
         ],
     )
     _write_ndjson_gz(

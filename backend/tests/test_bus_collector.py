@@ -53,8 +53,12 @@ def test_run_forever_never_calls_should_continue_when_not_given(tmp_path):
     assert call_count["n"] == 2
 
 
-_A_WEEKDAY = datetime(2026, 11, 16, tzinfo=timezone.utc)  # a real Monday
-_A_WEEKEND = datetime(2026, 11, 14, tzinfo=timezone.utc)  # a real Saturday
+# Noon UTC (= 7am EST), safely inside the real local calendar day so the
+# 2026-11-20 UTC/local boundary fix doesn't flip these -- midnight UTC is
+# exactly the ambiguous instant that fix addresses (it's still the
+# previous evening in NYC local time).
+_A_WEEKDAY = datetime(2026, 11, 16, 12, tzinfo=timezone.utc)  # a real Monday
+_A_WEEKEND = datetime(2026, 11, 14, 12, tzinfo=timezone.utc)  # a real Saturday
 
 
 def test_compute_effective_corridors_returns_all_when_gate_file_missing(tmp_path):

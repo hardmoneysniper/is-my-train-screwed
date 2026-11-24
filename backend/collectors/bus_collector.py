@@ -28,10 +28,13 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from google.transit import gtfs_realtime_pb2
 
 from app.day_type import day_type_for
+
+LOCAL_TZ = ZoneInfo("America/New_York")
 
 CORRIDORS = ["M60+", "Q102", "Q3", "Q10", "Q72", "Q80", "Q90"]  # spec §2 seed set +
 # Q102 (user, 2026-08-29) + Q3/B15 (user, 2026-09-28, the spec's own named
@@ -130,7 +133,11 @@ def compute_effective_corridors(now: datetime) -> list[str]:
     gate = _load_day_type_gate()
     if not gate:
         return CORRIDORS
-    today_type = day_type_for(now.date())
+    # `now` is UTC -- classify by NYC LOCAL date, same fix/reason as
+    # _rotated_path above (the day_type gate is itself keyed by local
+    # weekday/weekend, so comparing against a UTC-derived date here would
+    # reintroduce the same boundary bug one level up).
+    today_type = day_type_for(now.astimezone(LOCAL_TZ).date())
     return [route for route in CORRIDORS if route not in gate or today_type in gate[route]]
 
 
@@ -185,9 +192,18 @@ def _compress_stale_files(today_str: str) -> None:
 
 
 def _rotated_path(now: datetime) -> Path:
+    """`now` is a UTC datetime (see call site) -- rotated by NYC LOCAL
+    calendar date, not the UTC one. Real bug found 2026-11-20: during EST
+    (UTC-5), NYC local time is still 7pm-midnight of "today" while UTC has
+    already rolled over to "tomorrow" -- naming/rotating by the UTC date
+    silently misfiled every day's last ~5 hours of real collection under
+    the next date, corrupting weekday/weekend classification at the
+    Friday/Saturday and Sunday/Monday boundaries (confirmed live: 5.54% of
+    all bus arrival_events, ~86K rows, had the wrong day_type as a direct
+    result). See derive_bus_arrival_events.py's matching fix."""
     global _last_seen_date_str
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    today_str = now.strftime('%Y-%m-%d')
+    today_str = now.astimezone(LOCAL_TZ).strftime('%Y-%m-%d')
     if _last_seen_date_str != today_str:
         _compress_stale_files(today_str)
         _last_seen_date_str = today_str

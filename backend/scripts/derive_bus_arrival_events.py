@@ -98,7 +98,7 @@ def already_ingested(conn, service_date: date) -> bool:
     silently no-ops and newly-appended ones land for real. A PAST date is
     still safe (and cheap) to skip once it has any row: its raw file can
     never grow again, so there's nothing new to find."""
-    if service_date >= datetime.now(timezone.utc).date():
+    if service_date >= datetime.now(LOCAL_TZ).date():
         return False
     row = conn.execute(
         "SELECT 1 FROM arrival_events WHERE agency = 'bus' AND service_date = ? LIMIT 1",
@@ -174,7 +174,6 @@ def _build_event(
     stop_id: str,
     tracked: _TrackedStop,
     passed_at: datetime,
-    service_date: date,
 ) -> tuple[dict, str]:
     observed_arrival_dt = _midpoint(tracked.last_seen_at, passed_at)
     gap_seconds = (passed_at - tracked.last_seen_at).total_seconds()
@@ -182,6 +181,19 @@ def _build_event(
 
     target = observed_arrival_dt - timedelta(seconds=PREDICTION_LOOKBACK_SECONDS)
     predicted_epoch = _closest_prediction(tracked.prediction_history, target)
+
+    # service_date/day_type are derived from THIS event's own observed
+    # local time, never from the raw file's nominal (filename-derived)
+    # date -- real bug found 2026-11-20: the file-level date used to be
+    # passed straight through here, but bus_collector.py named/rotated
+    # files by UTC calendar date, so every day's last ~5 hours of real
+    # NYC-local collection (7pm-midnight EST) landed in the WRONG day's
+    # file, corrupting weekday/weekend classification at the Friday/
+    # Saturday and Sunday/Monday boundaries (confirmed: 5.54% of all bus
+    # arrival_events, ~86K rows). Grounding this in the event's own
+    # observed_arrival_dt makes it correct regardless of which file (or
+    # how a file happens to be named) the record was read from.
+    local_date = observed_arrival_dt.astimezone(LOCAL_TZ).date()
 
     event = {
         "agency": "bus",
@@ -194,8 +206,8 @@ def _build_event(
         "scheduled_arrival_ts": None,
         "delay_seconds": None,
         "predicted_arrival_ts_at_T_minus_5": _epoch_to_iso(predicted_epoch),
-        "service_date": service_date.isoformat(),
-        "day_type": day_type_for(service_date),
+        "service_date": local_date.isoformat(),
+        "day_type": day_type_for(local_date),
         "hour_bucket": observed_arrival_dt.astimezone(LOCAL_TZ).hour,
         "derivation_quality": quality,
     }
@@ -284,9 +296,7 @@ def process_day(conn, raw_path: Path, service_date: date) -> None:
 
             for stop_id in tracked_stop_ids - current_stop_ids:
                 t = tracked.pop(stop_id)
-                event, quality = _build_event(
-                    vehicle_id, stop_id, t, passed_at=poll_time, service_date=service_date
-                )
+                event, quality = _build_event(vehicle_id, stop_id, t, passed_at=poll_time)
                 events.append(event)
                 if quality == "ambiguous":
                     n_ambiguous += 1
