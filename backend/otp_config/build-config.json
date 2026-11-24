@@ -39,6 +39,11 @@
       "type": "gtfs",
       "feedId": "JFKAirtrain",
       "source": "file:///var/opentripplanner/airtrain.zip"
+    },
+    {
+      "type": "gtfs",
+      "feedId": "RIOCTram",
+      "source": "file:///var/opentripplanner/roosevelt_island_tram.zip"
     }
   ]
 }

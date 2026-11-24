@@ -87,6 +87,19 @@ class TransferRisk(BaseModel):
       n. `None` when that bucket is insufficient, same never-fabricate
       discipline, independent of whether `quality` is "ok".
 
+    `quality == "scheduled"` (2026-11-24, user) is a third, distinct case:
+    a tram leg (AirTrain JFK, the Roosevelt Island Tramway -- neither has
+    GTFS-RT collection or ever will) whose `p_miss` comes from a declared
+    *assumption* about the operator's own schedule adherence, not a real
+    reliability_buckets measurement -- currently only AirTrain JFK, since
+    it's unmanned/fully automated and assumed to always depart on
+    schedule (user, 2026-11-24); the Roosevelt Island Tramway has an
+    onboard operator and no such assumption, so it stays "insufficient"
+    like any other no-data case. `n`/`window_days` are 0 for a
+    "scheduled" entry -- there's no real sample behind it, so never cite
+    the observed-patterns footer for one (see
+    ConversationAgent.SYSTEM_PROMPT's "scheduled" clause).
+
     There is no `should_offer_reroute` field (2026-10-15, user: delete that
     feature entirely) -- the agent always asks the rider whether they want
     a faster route calculated whenever either `p_miss` or
@@ -111,5 +124,5 @@ class TransferRisk(BaseModel):
     p_miss: float | None
     n: float  # incoming leg's bucket n_observations -- the bucket p_miss is computed from; 0 if missing
     window_days: int
-    quality: Literal["ok", "insufficient"]
+    quality: Literal["ok", "insufficient", "scheduled"]
     typical_wait_seconds: float | None = None

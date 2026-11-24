@@ -89,6 +89,17 @@ _FILES = {
         ["feed_publisher_name", "feed_publisher_url", "feed_lang"],
         [{"feed_publisher_name": "MTA", "feed_publisher_url": "http://example.com", "feed_lang": "en"}],
     ),
+    # FR1 is R1's (kept) per-route fare, FR2 is R2's (dropped) per-route
+    # fare, FR3 has no route_id at all (a fare-zone rule, not per-route) and
+    # must survive regardless of which routes are kept.
+    "fare_rules.txt": (
+        ["fare_id", "route_id", "origin_id", "destination_id", "contains_id"],
+        [
+            {"fare_id": "FR1", "route_id": "R1", "origin_id": "", "destination_id": "", "contains_id": ""},
+            {"fare_id": "FR2", "route_id": "R2", "origin_id": "", "destination_id": "", "contains_id": ""},
+            {"fare_id": "FR3", "route_id": "", "origin_id": "", "destination_id": "", "contains_id": ""},
+        ],
+    ),
 }
 
 
@@ -197,6 +208,18 @@ def test_output_is_valid_zip_with_matching_headers(source_zip, tmp_path):
     for filename, (expected_fields, _) in _FILES.items():
         fieldnames, _ = _read_output_rows(output_zip, filename)
         assert fieldnames == expected_fields
+
+
+def test_fare_rules_dropped_for_dropped_routes_but_zone_rules_survive(source_zip, tmp_path):
+    output_zip = tmp_path / "out.zip"
+    filter_gtfs_by_route(source_zip, output_zip, ["R1"])
+
+    _, fare_rules = _read_output_rows(output_zip, "fare_rules.txt")
+    fare_ids = {r["fare_id"] for r in fare_rules}
+    # R1's own fare and the route-agnostic fare-zone rule survive; R2's
+    # (dropped route's) fare rule, which would otherwise leave a dangling
+    # route_id reference and crash OTP's GTFS reader, does not.
+    assert fare_ids == {"FR1", "FR3"}
 
 
 def test_nonexistent_route_id_produces_empty_result(source_zip, tmp_path):

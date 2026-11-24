@@ -49,7 +49,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app import bus_schedule_periods, gtfs_paths
+from app import bus_schedule_periods, gtfs_paths, tram_schedule
 from app.day_type import day_type_for
 from app.models.risk import TransferRisk
 from app.models.transit import Itinerary, Leg
@@ -164,7 +164,23 @@ _MODE_TO_AGENCY = {
     # ferry feed, not a data error. OTP tags those legs mode="BUS", so
     # they resolve via the "BUS" entry above, not this one -- correct
     # given the source data, not a gap to special-case.
+    # 2026-11-24 (user): AirTrain JFK and the Roosevelt Island Tramway are
+    # both GTFS route_type=0 in their real static feeds (confirmed against
+    # each -- not assumed), so OTP reports both as mode="TRAM". Neither
+    # has (or ever will have) GTFS-RT collection, so there's no
+    # reliability_buckets row for this agency ever -- see
+    # _compute_transfer_risk's tram branch and app/tram_schedule.py for
+    # how each of the two citable numbers is derived instead.
+    "TRAM": "tram",
 }
+
+# feedId string from otp_config/build-config.json's transitFeeds entry --
+# the one thing that tells AirTrain's leg apart from the Roosevelt Island
+# Tramway's once both resolve to the generic "tram" agency above. Can't
+# use route_short_name (Gap 2's usual disambiguator) for this: every
+# route in both real feeds has an empty short_name, which makes
+# RouteIndex.resolve() permanently ambiguous for them.
+_AIRTRAIN_FEED_ID = "JFKAirtrain"
 
 _default_route_index_cache: RouteIndex | None = None
 
@@ -188,6 +204,17 @@ def _strip_feed_prefix(stop_id: str) -> str:
     happen for a real OTP leg, but never crash on it)."""
     _, sep, bare = stop_id.partition(":")
     return bare if sep else stop_id
+
+
+def _feed_id(stop_id: str | None) -> str | None:
+    """The feedId portion of an OTP-formatted stop_id ("{feedId}:
+    {entity_id}"), or None if absent -- used only to tell AirTrain's leg
+    apart from the Roosevelt Island Tramway's (see _AIRTRAIN_FEED_ID),
+    since both resolve to the same generic "tram" agency."""
+    if stop_id is None:
+        return None
+    feed, sep, _ = stop_id.partition(":")
+    return feed if sep else None
 
 
 def _local_day_type_and_hour(epoch_ms: int) -> tuple[str, int]:
@@ -373,6 +400,27 @@ def citable_typical_wait_seconds(outgoing_histogram: dict) -> float | None:
     return None
 
 
+def _tram_p_miss(is_airtrain: bool, buffer_seconds: float) -> float | None:
+    """A tram's p_miss is never read from reliability_buckets (neither
+    operator has, or ever will have, GTFS-RT collection -- see
+    app/tram_schedule.py's docstring). AirTrain JFK is unmanned and fully
+    automated (user, 2026-11-24) -- assumed to always depart exactly on
+    schedule, so you miss the planned connection only if the buffer OTP
+    planned was already negative (shouldn't happen -- OTP only plans
+    feasible connections -- but answered honestly if it ever does). This
+    is a declared ASSUMPTION, not a measurement, which is exactly why it
+    gets its own "scheduled" quality rather than "ok" (see
+    _compute_transfer_risk and models/risk.py's TransferRisk docstring).
+
+    The Roosevelt Island Tramway has an onboard operator and no such
+    guarantee, and there's no real-time data for it either -- stays None
+    (insufficient), the same honest default as any other agency with no
+    evidence at all."""
+    if not is_airtrain:
+        return None
+    return 0.0 if buffer_seconds >= 0 else 1.0
+
+
 def _incoming_stat_type(agency_i: str) -> str:
     """Which stat_type the incoming leg's bucket is fetched from -- this is
     the fix for a real cross-task gap (final whole-branch review, Critical
@@ -415,6 +463,7 @@ def _compute_transfer_risk(
     day_type: str,
     hour_bucket: int,
     buffer_seconds: float,
+    is_airtrain_incoming: bool,
 ) -> tuple[float | None, float, int, str, float | None]:
     # Precompute lookup slot (deferred -- see docs/superpowers/plans/2026-08-27-phase-2-risk-engine-plan.md
     # Task 6 and README.md's "Known deferrals"). Not built yet: no 30+ days of real
@@ -468,12 +517,28 @@ def _compute_transfer_risk(
     # functions scripts/hourly_bus_sync.py's progress tracker calls, so
     # there's exactly one place this product's Wilson/mean-CI standard
     # lives, not a second copy here that could drift from it.
-    p_miss = citable_p_miss(json.loads(incoming["histogram"]), buffer_seconds) if incoming is not None else None
-    quality = "ok" if p_miss is not None else "insufficient"
+    #
+    # 2026-11-24 (user): a tram incoming/outgoing leg never has a bucket
+    # (incoming/outgoing above are already None for it -- _fetch_bucket
+    # only knows subway/bus), so it's handled as its own branch rather
+    # than folded into the citable_*/bucket path above: p_miss comes from
+    # a declared schedule ASSUMPTION (_tram_p_miss, AirTrain JFK only --
+    # see its docstring), never the "ok" quality a real measurement would
+    # get; typical_wait_seconds comes from the real published timetable
+    # (app/tram_schedule.py), not a histogram.
+    if agency_i == "tram":
+        p_miss = _tram_p_miss(is_airtrain_incoming, buffer_seconds)
+        quality = "scheduled" if p_miss is not None else "insufficient"
+    else:
+        p_miss = citable_p_miss(json.loads(incoming["histogram"]), buffer_seconds) if incoming is not None else None
+        quality = "ok" if p_miss is not None else "insufficient"
 
-    typical_wait_seconds = (
-        citable_typical_wait_seconds(json.loads(outgoing["histogram"])) if outgoing is not None else None
-    )
+    if agency_j == "tram":
+        typical_wait_seconds = tram_schedule.typical_wait_seconds(stop_id_j, day_type_j, hour_bucket_j)
+    else:
+        typical_wait_seconds = (
+            citable_typical_wait_seconds(json.loads(outgoing["histogram"])) if outgoing is not None else None
+        )
 
     return p_miss, n, window_days, quality, typical_wait_seconds
 
@@ -490,7 +555,14 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
     stop_id_i = _strip_feed_prefix(leg_i.to_stop_id) if leg_i.to_stop_id else None
     stop_id_j = _strip_feed_prefix(leg_j.from_stop_id) if leg_j.from_stop_id else None
 
-    if None in (agency_i, agency_j, route_id_i, route_id_j, stop_id_i, stop_id_j):
+    # route_id is never resolvable for a tram leg (both real tram feeds
+    # give every route an empty route_short_name, which RouteIndex always
+    # treats as ambiguous -- see _AIRTRAIN_FEED_ID's docstring) -- but
+    # nothing downstream for "tram" ever needs a route_id (see
+    # _compute_transfer_risk's tram branch), so it's not required here.
+    missing_core = agency_i is None or agency_j is None or stop_id_i is None or stop_id_j is None
+    missing_route = (agency_i != "tram" and route_id_i is None) or (agency_j != "tram" and route_id_j is None)
+    if missing_core or missing_route:
         return TransferRisk(
             from_route=from_route,
             to_route=to_route,
@@ -503,10 +575,11 @@ def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, ro
 
     day_type, hour_bucket = _local_day_type_and_hour(leg_j.start_time_ms)
     buffer_seconds = (leg_j.start_time_ms - leg_i.end_time_ms) / 1000
+    is_airtrain_incoming = agency_i == "tram" and _feed_id(leg_i.to_stop_id) == _AIRTRAIN_FEED_ID
 
     p_miss, n, window_days, quality, typical_wait_seconds = _compute_transfer_risk(
         conn, agency_i, route_id_i, stop_id_i, agency_j, route_id_j, stop_id_j,
-        day_type, hour_bucket, buffer_seconds,
+        day_type, hour_bucket, buffer_seconds, is_airtrain_incoming,
     )
     return TransferRisk(
         from_route=from_route,

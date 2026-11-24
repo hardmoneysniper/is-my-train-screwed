@@ -1226,3 +1226,229 @@ def test_ferry_transfer_degrades_to_insufficient_not_crash(conn, tmp_path):
     assert len(results) == 1
     assert results[0].quality == "insufficient"
     assert results[0].p_miss is None
+
+
+# --- trams (AirTrain JFK, Roosevelt Island Tramway) -- 2026-11-24 -------
+#
+# Both real feeds give every route an empty route_short_name, so
+# route_index never resolves one for a tram leg -- the fixture `conn`/
+# `route_index` (subway+bus only) already can't resolve "" either,
+# exercising the exact same unresolvable-route_id path for free.
+
+
+def test_tram_p_miss_is_zero_for_airtrain_with_nonnegative_buffer():
+    assert risk_engine._tram_p_miss(True, 300.0) == 0.0
+
+
+def test_tram_p_miss_is_one_for_airtrain_with_negative_buffer():
+    # Shouldn't happen -- OTP only plans feasible connections -- but a
+    # deterministic assumption must still answer this honestly.
+    assert risk_engine._tram_p_miss(True, -5.0) == 1.0
+
+
+def test_tram_p_miss_is_none_when_not_airtrain():
+    # The Roosevelt Island Tramway has no such assumption.
+    assert risk_engine._tram_p_miss(False, 300.0) is None
+
+
+def test_feed_id_extracts_the_feed_prefix():
+    assert risk_engine._feed_id("JFKAirtrain:160559") == "JFKAirtrain"
+
+
+def test_feed_id_returns_none_for_a_bare_id():
+    assert risk_engine._feed_id("160559") is None
+
+
+def test_feed_id_returns_none_for_none():
+    assert risk_engine._feed_id(None) is None
+
+
+def test_subway_incoming_to_airtrain_outgoing_combines_real_subway_data_with_schedule_wait(
+    conn, route_index, monkeypatch,
+):
+    # Subway incoming leg has a real, sufficient reliability bucket --
+    # p_miss/quality must come from that, completely unaffected by the
+    # outgoing leg being a tram with no bucket at all. Before the
+    # route_id-not-required-for-tram fix, this whole transfer would have
+    # been unmatchable (route_id_j unresolvable for AirTrain) even though
+    # the subway side had perfectly real, usable data.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+    monkeypatch.setattr(risk_engine.tram_schedule, "typical_wait_seconds", lambda stop_id, day_type, hour: 600.0)
+
+    itinerary = Itinerary(
+        duration_seconds=1800,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="TRAM",
+                route_short_name="",
+                from_stop_id="JFKAirtrain:160565",
+                from_stop_name="Jamaica Station",
+                to_stop_id="JFKAirtrain:160559",
+                to_stop_name="Terminal 4",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 20, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 30, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.p_miss is not None
+    assert r.n == 200
+    assert r.typical_wait_seconds == 600.0
+
+
+def test_airtrain_incoming_leg_assumes_always_on_schedule(conn, route_index):
+    # AirTrain JFK is unmanned/automated -- assumed to always depart on
+    # schedule (user, 2026-11-24). No reliability_buckets row exists or
+    # ever will for agency='tram'; this must still produce a real,
+    # deterministic p_miss, not 'insufficient'.
+    itinerary = Itinerary(
+        duration_seconds=1800,
+        legs=[
+            Leg(
+                mode="TRAM",
+                route_short_name="",
+                from_stop_id="JFKAirtrain:160565",
+                from_stop_name="Jamaica Station",
+                to_stop_id="JFKAirtrain:160559",
+                to_stop_name="Terminal 4",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06S",
+                from_stop_name="Terminal 4",
+                to_stop_id="MTA_NYCT_Subway:B08N",
+                to_stop_name="Roosevelt Island",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 15, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "scheduled"
+    assert r.p_miss == 0.0
+    assert r.n == 0
+    assert r.window_days == 0
+
+
+def test_roosevelt_island_tram_incoming_leg_has_no_schedule_assumption(conn, route_index):
+    # Unlike AirTrain, the Roosevelt Island Tramway has an onboard
+    # operator and no automated on-time guarantee -- and there's no
+    # real-time collection for it either. Must stay honestly
+    # 'insufficient', never borrow AirTrain's assumption.
+    itinerary = Itinerary(
+        duration_seconds=1200,
+        legs=[
+            Leg(
+                mode="TRAM",
+                route_short_name="",
+                from_stop_id="RIOCTram:2436149",
+                from_stop_name="Manhattan Tram Station",
+                to_stop_id="RIOCTram:2437315",
+                to_stop_name="Roosevelt Island Tram Station",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 5, 0),
+            ),
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:B08N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 20, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    assert results[0].quality == "insufficient"
+    assert results[0].p_miss is None
+
+
+def test_subway_incoming_to_roosevelt_island_tram_outgoing_gets_schedule_wait(conn, route_index, monkeypatch):
+    # Same shape as the AirTrain version above -- the schedule-based wait
+    # time isn't AirTrain-specific, it applies to any tram leg.
+    _insert_bucket(
+        conn,
+        agency="subway",
+        route_id="F",
+        stop_id="127N",
+        day_type="weekday",
+        hour_bucket=8,
+        stat_type="delay",
+        histogram=json.dumps(
+            {"bin_width_s": 30, "min_s": -600, "counts": [200.0 if i == 20 else 0.0 for i in range(101)]}
+        ),
+        n_observations=200,
+    )
+    monkeypatch.setattr(risk_engine.tram_schedule, "typical_wait_seconds", lambda stop_id, day_type, hour: 300.0)
+
+    itinerary = Itinerary(
+        duration_seconds=1200,
+        legs=[
+            Leg(
+                mode="SUBWAY",
+                route_short_name="F",
+                from_stop_id="MTA_NYCT_Subway:B06N",
+                from_stop_name="Roosevelt Island",
+                to_stop_id="MTA_NYCT_Subway:127N",
+                to_stop_name="Lexington Av/63 St",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 0, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 10, 0),
+            ),
+            Leg(
+                mode="TRAM",
+                route_short_name="",
+                from_stop_id="RIOCTram:2436149",
+                from_stop_name="Manhattan Tram Station",
+                to_stop_id="RIOCTram:2437315",
+                to_stop_name="Roosevelt Island Tram Station",
+                start_time_ms=_local_ms(2026, 8, 24, 8, 20, 0),
+                end_time_ms=_local_ms(2026, 8, 24, 8, 25, 0),
+            ),
+        ],
+    )
+
+    results = get_risk(itinerary, conn=conn, route_index=route_index)
+
+    assert len(results) == 1
+    r = results[0]
+    assert r.quality == "ok"
+    assert r.typical_wait_seconds == 300.0

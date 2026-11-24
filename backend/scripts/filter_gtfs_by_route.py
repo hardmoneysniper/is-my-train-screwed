@@ -29,6 +29,7 @@ _FILTERED_FILES = {
     "calendar.txt",
     "calendar_dates.txt",
     "shapes.txt",
+    "fare_rules.txt",
 }
 
 _REQUIRED_FILES = {"routes.txt", "trips.txt", "stop_times.txt", "stops.txt"}
@@ -100,6 +101,16 @@ def filter_gtfs_by_route(source_zip: Path, output_zip: Path, route_ids) -> dict:
                 c for c in calendar_dates_rows if c.get("service_id") in kept_service_ids
             ]
 
+        # fare_rules.txt rows are per-route when route_id is set (OTP's GTFS
+        # reader validates the reference and crashes on a dangling route_id
+        # from a dropped route) but fare-zone-only rows leave it blank and
+        # must survive untouched.
+        fare_rules_fields, fare_rules_rows = _read_csv_rows(src, "fare_rules.txt")
+        if fare_rules_rows is not None:
+            fare_rules_rows = [
+                r for r in fare_rules_rows if not r.get("route_id") or r.get("route_id") in route_ids
+            ]
+
         shapes_fields, shapes_rows = _read_csv_rows(src, "shapes.txt")
         if shapes_rows is not None:
             kept_shape_ids = set()
@@ -133,6 +144,10 @@ def filter_gtfs_by_route(source_zip: Path, output_zip: Path, route_ids) -> dict:
             if shapes_rows is not None:
                 _write_csv(dst, "shapes.txt", shapes_fields, shapes_rows)
                 counts["shapes.txt"] = len(shapes_rows)
+
+            if fare_rules_rows is not None:
+                _write_csv(dst, "fare_rules.txt", fare_rules_fields, fare_rules_rows)
+                counts["fare_rules.txt"] = len(fare_rules_rows)
 
             # Everything else (agency.txt, feed_info.txt, transfers.txt, ...)
             # is copied through byte-for-byte, unfiltered.

@@ -31,9 +31,19 @@ ALL_ZIP_NAMES = [
     "bus_staten_island.zip",
     "ferry.zip",
     "airtrain.zip",
+    "roosevelt_island_tram.zip",
 ]
 
 BUS_ZIP_NAMES = [
     "bus.zip", "bus_bronx.zip", "bus_brooklyn.zip",
     "bus_manhattan.zip", "bus_queens.zip", "bus_staten_island.zip",
 ]
+
+# app/tram_schedule.py's own scan list -- both operators run a fixed
+# published timetable with no GTFS-RT collection (ever), so their
+# typical_wait_seconds is read directly from these, not from
+# reliability_buckets. Kept as its own literal list for the same reason
+# BUS_ZIP_NAMES is (see module docstring) -- tram_schedule.py scans for a
+# matching stop_id and returns on the first hit, so reordering could
+# silently matter if a stop_id were ever ambiguous between the two.
+TRAM_ZIP_NAMES = ["airtrain.zip", "roosevelt_island_tram.zip"]
