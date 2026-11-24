@@ -44,6 +44,20 @@ before being returned, dropping any candidate that plainly doesn't match
 what the rider described. Still never invents a coordinate -- it can
 only drop a bad candidate, never substitute one of its own (see that
 module's docstring for why).
+
+2026-11-24: optional `bias_lat`/`bias_lon` -- a real, previously-missing
+gap found while live-testing a different bug: a destination described as
+"near me" (e.g. "a pharmacy near me") had zero geographic grounding --
+location_resolver.py already strips "near"/"by" as filler words before
+this ever runs, and this function's own Geoapify call had no proximity
+signal at all, so the match could legitimately be anywhere in the NYC
+bbox, not actually near the rider. When the caller has the rider's real
+current-location coordinates (the same [User's current location: ...]
+marker plan_route already uses), it can pass them here to bias --
+never filter -- results toward that point. A soft bias, not a hard
+cutoff: a genuinely better-matching place further away can still win,
+which is correct -- this fixes ungrounded results, it doesn't pretend
+"near me" means "nearest, no matter what."
 """
 import httpx
 
@@ -56,7 +70,12 @@ NYC_BBOX_FILTER = "rect:-74.08,40.49,-73.70,40.85"
 MAX_CANDIDATES = 5
 
 
-async def find_place(query: str, original_query: str | None = None) -> list[dict]:
+async def find_place(
+    query: str,
+    original_query: str | None = None,
+    bias_lat: float | None = None,
+    bias_lon: float | None = None,
+) -> list[dict]:
     """`query` is what's actually sent to Geoapify -- typically
     location_resolver.py's cleaned-up rewrite, since that's what geocodes
     reliably (see module docstring). `original_query` -- the rider's own
@@ -64,19 +83,28 @@ async def find_place(query: str, original_query: str | None = None) -> list[dict
     quality check compares candidates against instead, since that's the
     real signal for rider intent; defaults to `query` when omitted, so a
     direct call bypassing location_resolver (e.g. in tests, or a caller
-    with no separate original string) still behaves sensibly."""
+    with no separate original string) still behaves sensibly.
+
+    `bias_lat`/`bias_lon` -- the rider's real current coordinates, when
+    the caller has them and the description implies proximity (e.g.
+    "near me") -- bias Geoapify's ranking toward that point. Omitted
+    (either one missing leaves the search unbiased, same as before) when
+    the caller has no real coordinates to offer; never invented here."""
     if original_query is None:
         original_query = query
+    params = {
+        "text": query,
+        "apiKey": settings.geoapify_api_key,
+        "filter": NYC_BBOX_FILTER,
+        "limit": MAX_CANDIDATES,
+    }
+    if bias_lat is not None and bias_lon is not None:
+        params["bias"] = f"proximity:{bias_lon},{bias_lat}"
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 GEOAPIFY_URL,
-                params={
-                    "text": query,
-                    "apiKey": settings.geoapify_api_key,
-                    "filter": NYC_BBOX_FILTER,
-                    "limit": MAX_CANDIDATES,
-                },
+                params=params,
                 timeout=15,
             )
             response.raise_for_status()

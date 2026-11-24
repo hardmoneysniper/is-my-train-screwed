@@ -79,6 +79,13 @@ export async function sendChatMessage(
   message: string,
   conversationHistory: ChatMessage[]
 ): Promise<ChatResponse> {
+  // Once granted, a location is attached to EVERY subsequent message for
+  // the rest of the freshness window, not re-gated by the keyword check
+  // per message (walking-navigation design doc §2) -- the mid-trip
+  // destination-change and reroute flows need it on turns that don't
+  // repeat "here"/"near me" (e.g. "actually take me to X instead"). The
+  // agent decides per-message whether the marker is actually relevant --
+  // see SYSTEM_PROMPT's explicit-named-place-takes-precedence rule.
   if (shouldRequestLocation(message) && isLocationStale()) {
     const result = await requestLocation()
     if (result !== null) {

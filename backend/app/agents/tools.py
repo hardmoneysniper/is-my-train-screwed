@@ -45,6 +45,8 @@ FIND_PLACE_TOOL = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "The free-text business or landmark name to search for, ideally including a street or neighborhood if known."},
+            "near_lat": {"type": "number", "description": "The rider's real current latitude, ONLY when their description implies proximity to themselves (e.g. 'near me', 'close by') AND a [User's current location: ...] marker is present on the message — pass that marker's exact latitude here to bias results toward it. Omit otherwise; never invent a value."},
+            "near_lon": {"type": "number", "description": "Same as near_lat, for longitude — both must be given together or neither."},
         },
         "required": ["query"],
     },

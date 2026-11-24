@@ -61,6 +61,20 @@ SYSTEM_PROMPT = (
     "entries, narrate each using its exact p_miss/n/window_days; if an "
     "entry's quality is 'insufficient', say reliability data isn't "
     "available yet for that transfer rather than stating a number. "
+    "A [User's current location: ...] marker, when present, reflects the "
+    "device's location at send time — it is NOT a signal about what THIS "
+    "particular message is asking about, since (same as anonymous_id) it "
+    "rides along on every message for as long as the browser's fix stays "
+    "fresh, including ones that have nothing to do with it. If the "
+    "message names an explicit origin or destination (a stop, address, "
+    "or landmark — e.g. 'from Cornell Tech', 'to Grand Central'), resolve "
+    "and use THAT place for that role via find_stop/find_address/"
+    "find_place, even if a marker is also present — never substitute the "
+    "marker's coordinates for a place the user actually named. Only use "
+    "the marker when the message itself refers to current location for "
+    "that role (e.g. 'from here', 'near me') and names no other place for "
+    "it, or for the mid-trip flows below that explicitly call for the "
+    "user's current location regardless of wording.\n"
     "If the user names a place instead of giving coordinates, call "
     "find_stop first to resolve it, then use the result's lat/lon with "
     "plan_route — never invent coordinates. This applies EVERY time you "
@@ -87,7 +101,15 @@ SYSTEM_PROMPT = (
     "match for a free-text origin or destination, call find_place — a "
     "broader business/landmark-name search that already normalizes vague "
     "or colloquial wording internally before geocoding it, so pass the "
-    "user's description through as-is. It returns a LIST of candidates, "
+    "user's description through as-is. If their description implies "
+    "proximity to themselves (e.g. 'near me', 'close by', 'nearby') AND a "
+    "[User's current location: ...] marker is present on the message, "
+    "also pass that marker's exact latitude/longitude as find_place's "
+    "near_lat/near_lon — this only biases the ranking toward that point, "
+    "it doesn't filter results, so still show whatever real candidates "
+    "come back. Omit near_lat/near_lon entirely when no marker is "
+    "present or the description doesn't imply proximity — never invent "
+    "coordinates for this. It returns a LIST of candidates, "
     "not one answer — if it returns more than one, list the distinct "
     "matches (using each one's real formatted address) and ask the user "
     "which they meant before proceeding, e.g. \"I found a few matches — "
@@ -507,7 +529,11 @@ class ConversationAgent:
                 elif tool_use.name == "find_place":
                     original_query = tool_use.input["query"]
                     resolved_query = await resolve_location_description(original_query)
-                    place_result = await find_place(resolved_query, original_query)
+                    place_result = await find_place(
+                        resolved_query, original_query,
+                        bias_lat=tool_use.input.get("near_lat"),
+                        bias_lon=tool_use.input.get("near_lon"),
+                    )
                     content = json.dumps(place_result)
                 elif tool_use.name == "create_monitored_trip":
                     content = await self._handle_create_monitored_trip(tool_use.input, last_itineraries, anonymous_id)

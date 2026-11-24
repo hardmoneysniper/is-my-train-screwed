@@ -109,6 +109,52 @@ async def test_find_place_defaults_original_query_to_query_when_not_given():
 
 
 @pytest.mark.asyncio
+async def test_find_place_adds_proximity_bias_when_both_coordinates_given():
+    mock_response = AsyncMock()
+    mock_response.json = lambda: SINGLE_MATCH_RESPONSE
+    mock_response.raise_for_status = lambda: None
+    with (
+        patch("app.find_place.httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response) as mock_get,
+        patch("app.find_place.check_location_matches", new_callable=AsyncMock, side_effect=lambda _q, c: c),
+    ):
+        await find_place("pharmacy", bias_lat=40.7597, bias_lon=-73.9532)
+
+    call_kwargs = mock_get.await_args.kwargs
+    # Geoapify's real format: "proximity:LON,LAT" (longitude first).
+    assert call_kwargs["params"]["bias"] == "proximity:-73.9532,40.7597"
+
+
+@pytest.mark.asyncio
+async def test_find_place_omits_bias_when_coordinates_not_given():
+    mock_response = AsyncMock()
+    mock_response.json = lambda: SINGLE_MATCH_RESPONSE
+    mock_response.raise_for_status = lambda: None
+    with (
+        patch("app.find_place.httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response) as mock_get,
+        patch("app.find_place.check_location_matches", new_callable=AsyncMock, side_effect=lambda _q, c: c),
+    ):
+        await find_place("pharmacy")
+
+    assert "bias" not in mock_get.await_args.kwargs["params"]
+
+
+@pytest.mark.asyncio
+async def test_find_place_omits_bias_when_only_one_coordinate_given():
+    # Half a coordinate pair is not a real point -- never send a
+    # malformed bias rather than silently guessing the missing half.
+    mock_response = AsyncMock()
+    mock_response.json = lambda: SINGLE_MATCH_RESPONSE
+    mock_response.raise_for_status = lambda: None
+    with (
+        patch("app.find_place.httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response) as mock_get,
+        patch("app.find_place.check_location_matches", new_callable=AsyncMock, side_effect=lambda _q, c: c),
+    ):
+        await find_place("pharmacy", bias_lat=40.7597)
+
+    assert "bias" not in mock_get.await_args.kwargs["params"]
+
+
+@pytest.mark.asyncio
 async def test_find_place_returns_empty_list_on_no_match():
     mock_response = AsyncMock()
     mock_response.json = lambda: NO_MATCH_RESPONSE

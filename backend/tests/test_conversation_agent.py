@@ -1212,6 +1212,23 @@ async def test_user_location_injected_into_user_message_not_system_prompt(monkey
     assert "40.7597" not in SYSTEM_PROMPT
 
 
+def test_system_prompt_gives_named_place_precedence_over_location_marker():
+    # Real incident (2026-11-24 live testing): the frontend attaches a
+    # cached device location to every message for its freshness window
+    # (by design -- walking-nav design doc Sec2, needed for the mid-trip
+    # flows below), not just ones that say "here"/"near me". A user asked
+    # "from Cornell Tech to 145 E 57th St" while an earlier, unrelated
+    # "near me"-style turn's marker was still fresh; without an explicit
+    # precedence rule, nothing told the model the marker belongs to the
+    # DEVICE, not to this message, so it used the marker's coordinates
+    # instead of resolving "Cornell Tech" -- a real but wrong-origin route.
+    # Can't unit-test LLM prose compliance itself (same caveat as every
+    # other prompt-driven test in this codebase), only that the rule is
+    # actually present in the prompt sent to the model.
+    assert "NOT a signal about what THIS" in SYSTEM_PROMPT
+    assert "never substitute the marker's coordinates for a place the user actually named" in SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_no_user_location_key_when_not_given(monkeypatch):
     agent = ConversationAgent()
@@ -1308,7 +1325,44 @@ async def test_find_place_tool_dispatches_to_find_place(monkeypatch):
     # point of the resolver step. Its second arg (what the post-fetch
     # quality check compares candidates against) must be the user's own
     # original wording instead -- see find_place.py's docstring for why.
-    mock_find_place.assert_awaited_once_with("Zara, Manhattan", "the zara on 21st st")
+    mock_find_place.assert_awaited_once_with(
+        "Zara, Manhattan", "the zara on 21st st", bias_lat=None, bias_lon=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_place_tool_forwards_near_lat_lon_when_the_model_supplies_them(monkeypatch):
+    # Real gap fixed 2026-11-24: "a pharmacy near me" had no geographic
+    # grounding at all -- this proves the model's near_lat/near_lon tool
+    # input actually reaches find_place as a proximity bias.
+    agent = ConversationAgent()
+    captured_messages = []
+
+    async def fake_create(messages):
+        captured_messages.append(messages)
+        if len(captured_messages) == 1:
+            return _tool_use_response(
+                "find_place",
+                {"query": "a pharmacy near me", "near_lat": 40.7597, "near_lon": -73.9532},
+            )
+        return _text_response("Found it.")
+
+    monkeypatch.setattr(agent, "_create", fake_create)
+    monkeypatch.setattr(
+        "app.agents.conversation_agent.resolve_location_description",
+        AsyncMock(return_value="pharmacy"),
+    )
+    mock_find_place = AsyncMock(return_value=[])
+    monkeypatch.setattr("app.agents.conversation_agent.find_place", mock_find_place)
+
+    await agent.respond(
+        "find a pharmacy near me", [], "anon-1",
+        user_location={"lat": 40.7597, "lon": -73.9532},
+    )
+
+    mock_find_place.assert_awaited_once_with(
+        "pharmacy", "a pharmacy near me", bias_lat=40.7597, bias_lon=-73.9532
+    )
 
 
 @pytest.mark.asyncio

@@ -140,4 +140,27 @@ describe('sendChatMessage with location', () => {
 
     vi.useRealTimers()
   })
+
+  it('still attaches a fresh cached location to a later message with no location phrase', async () => {
+    // Walking-navigation design doc §2: once granted, the location rides
+    // along on every message for the freshness window, not just ones that
+    // repeat "here"/"near me" -- the mid-trip destination-change flow
+    // ("actually take me to X instead") depends on this; the agent (not
+    // the frontend) decides per-message whether the marker is relevant.
+    mockGeolocation.getCurrentPosition.mockImplementation((success) => {
+      success({ coords: { latitude: 40.7597, longitude: -73.9532 } })
+    })
+    vi.useFakeTimers()
+
+    await sendChatMessage('get me home from here', [])
+    vi.advanceTimersByTime(30 * 1000) // 30s later -- cache is still fresh
+
+    await sendChatMessage('actually take me to Grand Central instead', [])
+
+    const secondCallBody = JSON.parse((fetch as any).mock.calls[1][1].body)
+    expect(secondCallBody.user_location).toEqual({ lat: 40.7597, lon: -73.9532 })
+    expect(mockGeolocation.getCurrentPosition).toHaveBeenCalledTimes(1) // no re-request needed
+
+    vi.useRealTimers()
+  })
 })
