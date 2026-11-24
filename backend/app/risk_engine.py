@@ -217,6 +217,26 @@ def _feed_id(stop_id: str | None) -> str | None:
     return feed if sep else None
 
 
+_ROOSEVELT_TRAM_FEED_ID = "RIOCTram"
+
+
+def _tram_label(stop_id: str | None) -> str:
+    """A real, human-readable stand-in for a tram leg's always-empty
+    route_short_name (2026-11-24 fix) -- live-testing found the model
+    silently dropping the AirTrain->subway transfer's narration entirely,
+    and the leading theory is the bare "" this produced for from_route
+    read as a placeholder/malformed row rather than a real transfer
+    participant. route_short_name itself can't be used (see
+    _AIRTRAIN_FEED_ID's docstring -- both real tram feeds give every
+    route an empty short name), so this reads the feedId instead."""
+    feed = _feed_id(stop_id)
+    if feed == _AIRTRAIN_FEED_ID:
+        return "AirTrain"
+    if feed == _ROOSEVELT_TRAM_FEED_ID:
+        return "Roosevelt Island Tram"
+    return "Tram"
+
+
 def _local_day_type_and_hour(epoch_ms: int) -> tuple[str, int]:
     dt_utc = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
     dt_local = dt_utc.astimezone(LOCAL_TZ)
@@ -544,12 +564,19 @@ def _compute_transfer_risk(
 
 
 def _transfer_risk_for_pair(conn: sqlite3.Connection, leg_i: Leg, leg_j: Leg, route_index: RouteIndex) -> TransferRisk:
-    from_route = leg_i.route_short_name or ""
-    to_route = leg_j.route_short_name or ""
     transfer_stop_name = leg_j.from_stop_name
 
     agency_i = _MODE_TO_AGENCY.get(leg_i.mode)
     agency_j = _MODE_TO_AGENCY.get(leg_j.mode)
+    # A tram leg's route_short_name is always empty (see _AIRTRAIN_FEED_ID's
+    # docstring) -- narrating it as "" read, in live testing, like a
+    # malformed/placeholder row rather than a real transfer participant,
+    # and the model silently dropped that whole entry's narration as a
+    # result. _tram_label gives it a real, human-readable stand-in
+    # instead (never affects routing/risk math, narration-only, same as
+    # from_route/to_route always were).
+    from_route = leg_i.route_short_name or (_tram_label(leg_i.to_stop_id) if agency_i == "tram" else "")
+    to_route = leg_j.route_short_name or (_tram_label(leg_j.from_stop_id) if agency_j == "tram" else "")
     route_id_i = route_index.resolve(leg_i.route_short_name)
     route_id_j = route_index.resolve(leg_j.route_short_name)
     stop_id_i = _strip_feed_prefix(leg_i.to_stop_id) if leg_i.to_stop_id else None

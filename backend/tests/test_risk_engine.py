@@ -1263,6 +1263,16 @@ def test_feed_id_returns_none_for_none():
     assert risk_engine._feed_id(None) is None
 
 
+def test_tram_label_distinguishes_airtrain_from_roosevelt_island_tram():
+    assert risk_engine._tram_label("JFKAirtrain:160559") == "AirTrain"
+    assert risk_engine._tram_label("RIOCTram:2436149") == "Roosevelt Island Tram"
+
+
+def test_tram_label_falls_back_to_generic_tram_for_an_unrecognized_feed():
+    assert risk_engine._tram_label("SomeOtherFeed:1") == "Tram"
+    assert risk_engine._tram_label(None) == "Tram"
+
+
 def test_subway_incoming_to_airtrain_outgoing_combines_real_subway_data_with_schedule_wait(
     conn, route_index, monkeypatch,
 ):
@@ -1321,6 +1331,10 @@ def test_subway_incoming_to_airtrain_outgoing_combines_real_subway_data_with_sch
     assert r.p_miss is not None
     assert r.n == 200
     assert r.typical_wait_seconds == 600.0
+    # 2026-11-24 fix: a blank to_route for the AirTrain outgoing leg read,
+    # in live testing, like a malformed row and got silently narrated as
+    # an extra unwarranted "scheduled" statement -- a real label fixes it.
+    assert r.to_route == "AirTrain"
 
 
 def test_airtrain_incoming_leg_assumes_always_on_schedule(conn, route_index):
@@ -1362,6 +1376,10 @@ def test_airtrain_incoming_leg_assumes_always_on_schedule(conn, route_index):
     assert r.p_miss == 0.0
     assert r.n == 0
     assert r.window_days == 0
+    # 2026-11-24 fix: live-testing found the model silently dropping this
+    # exact entry's narration -- the leading theory was a blank from_route
+    # reading as a malformed/placeholder row rather than a real transfer.
+    assert r.from_route == "AirTrain"
 
 
 def test_roosevelt_island_tram_incoming_leg_has_no_schedule_assumption(conn, route_index):
@@ -1400,6 +1418,7 @@ def test_roosevelt_island_tram_incoming_leg_has_no_schedule_assumption(conn, rou
     assert len(results) == 1
     assert results[0].quality == "insufficient"
     assert results[0].p_miss is None
+    assert results[0].from_route == "Roosevelt Island Tram"
 
 
 def test_subway_incoming_to_roosevelt_island_tram_outgoing_gets_schedule_wait(conn, route_index, monkeypatch):
